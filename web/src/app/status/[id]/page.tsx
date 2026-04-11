@@ -14,7 +14,7 @@ export default function StatusPage() {
   const [copied, setCopied] = useState(false);
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [cancelling, setCancelling] = useState(false);
-  const supabase = createClient();
+  const supabase = createClient(id);
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;

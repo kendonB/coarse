@@ -11,7 +11,7 @@ export default function ReviewPageClient({ id }: { id: string }) {
   const [review, setReview] = useState<Review | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
-  const supabase = createClient();
+  const supabase = createClient(id);
 
   useEffect(() => {
     async function load() {

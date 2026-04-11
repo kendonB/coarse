@@ -22,12 +22,22 @@ create table reviews (
   completed_at timestamptz
 );
 
--- RLS: reads are open (UUID is unguessable, serves as access token).
+-- RLS: reads require a matching x-review-id header (UUID access token).
+-- This prevents anon clients from listing/enumerating all reviews.
 -- All writes are done server-side via the service key, which bypasses RLS.
 alter table reviews enable row level security;
 
 create policy "Anyone can view reviews by id"
-  on reviews for select using (true);
+  on reviews
+  for select
+  using (
+    id = (
+      nullif(
+        (current_setting('request.headers', true)::json ->> 'x-review-id'),
+        ''
+      )::uuid
+    )
+  );
 
 -- ============================================================================
 -- Review emails (PII separated from public review data)
