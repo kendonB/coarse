@@ -42,7 +42,7 @@ export default function StatusPage() {
     fetchStatus();
     interval = setInterval(fetchStatus, 3000);
     return () => clearInterval(interval);
-  }, [id, router]);
+  }, [id, router, supabase]);
 
   function copyLink() {
     navigator.clipboard.writeText(`${window.location.origin}/review/${id}`);
