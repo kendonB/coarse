@@ -151,7 +151,30 @@ export default function ReviewPageClient({ id }: { id: string }) {
     );
   }
 
-  if (!review) return null;
+  if (!review) {
+    return (
+      <div
+        style={{
+          background: "var(--board)",
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <span
+          style={{
+            fontFamily: "Georgia, serif",
+            fontStyle: "italic",
+            color: "var(--dust)",
+            fontSize: "1.1rem",
+          }}
+        >
+          Reconnecting<span className="blink">_</span>
+        </span>
+      </div>
+    );
+  }
 
   const isDone = review.status === "done";
   const isPending = review.status === "queued" || review.status === "running";
