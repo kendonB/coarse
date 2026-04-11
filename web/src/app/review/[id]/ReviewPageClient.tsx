@@ -14,7 +14,8 @@ export default function ReviewPageClient({ id }: { id: string }) {
   const supabase = useMemo(() => createClient(id), [id]);
 
   useEffect(() => {
-    let pollInterval: ReturnType<typeof setInterval>;
+    let pollTimeout: ReturnType<typeof setTimeout>;
+    let isActive = true;
 
     async function load() {
       const { data } = await supabase
@@ -23,23 +24,29 @@ export default function ReviewPageClient({ id }: { id: string }) {
         .eq("id", id)
         .single();
 
+      if (!isActive) return;
+
       if (!data) {
         setNotFound(true);
-        clearInterval(pollInterval);
+        setLoading(false);
+        return;
       } else {
         setReview(data as Review);
         if (data.status === "done" || data.status === "failed") {
-          clearInterval(pollInterval);
+          setLoading(false);
+          return;
         }
       }
       setLoading(false);
+
+      pollTimeout = setTimeout(load, 3000);
     }
 
     load();
-    pollInterval = setInterval(load, 3000);
 
     return () => {
-      clearInterval(pollInterval);
+      isActive = false;
+      clearTimeout(pollTimeout);
     };
   }, [id]);
 
