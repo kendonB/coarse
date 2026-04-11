@@ -14,6 +14,8 @@ export default function ReviewPageClient({ id }: { id: string }) {
   const supabase = createClient(id);
 
   useEffect(() => {
+    let pollInterval: ReturnType<typeof setInterval>;
+
     async function load() {
       const { data } = await supabase
         .from("reviews")
@@ -25,11 +27,15 @@ export default function ReviewPageClient({ id }: { id: string }) {
         setNotFound(true);
       } else {
         setReview(data as Review);
+        if (data.status === "done" || data.status === "failed") {
+          clearInterval(pollInterval);
+        }
       }
       setLoading(false);
     }
 
     load();
+    pollInterval = setInterval(load, 3000);
 
     const channel = supabase
       .channel(`review-${id}`)
@@ -42,7 +48,10 @@ export default function ReviewPageClient({ id }: { id: string }) {
       )
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
+    return () => {
+      clearInterval(pollInterval);
+      supabase.removeChannel(channel);
+    };
   }, [id]);
 
   const parsed = useMemo(
