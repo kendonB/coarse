@@ -7,6 +7,9 @@ import { PageMarks } from "@/components/charcoal";
 import { parseReview } from "@/lib/parseReview";
 import ReviewDisplay from "@/components/ReviewDisplay";
 
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export default function ReviewPageClient({ id }: { id: string }) {
   const [review, setReview] = useState<Review | null>(null);
   const [loading, setLoading] = useState(true);
@@ -14,6 +17,12 @@ export default function ReviewPageClient({ id }: { id: string }) {
   const supabase = useMemo(() => createClient(id), [id]);
 
   useEffect(() => {
+    if (!UUID_REGEX.test(id)) {
+      setNotFound(true);
+      setLoading(false);
+      return;
+    }
+
     let pollTimeout: ReturnType<typeof setTimeout>;
     let isActive = true;
 
