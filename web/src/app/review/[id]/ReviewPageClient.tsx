@@ -18,7 +18,7 @@ export default function ReviewPageClient({ id }: { id: string }) {
     let isActive = true;
 
     async function load() {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("reviews")
         .select("*")
         .eq("id", id)
@@ -26,19 +26,34 @@ export default function ReviewPageClient({ id }: { id: string }) {
 
       if (!isActive) return;
 
-      if (!data) {
-        setNotFound(true);
-        setLoading(false);
-        return;
-      } else {
-        setReview(data as Review);
-        if (data.status === "done" || data.status === "failed") {
+      if (error) {
+        // "No rows" should render not-found and stop polling.
+        if (error.code === "PGRST116") {
+          setNotFound(true);
           setLoading(false);
           return;
         }
+        // Transient/network/RLS errors should retry.
+        setLoading(false);
+        pollTimeout = setTimeout(load, 3000);
+        return;
       }
-      setLoading(false);
 
+      if (!data) {
+        // Defensive fallback: keep polling instead of flipping to not-found.
+        setLoading(false);
+        pollTimeout = setTimeout(load, 3000);
+        return;
+      }
+
+      setNotFound(false);
+      setReview(data as Review);
+      if (data.status === "done" || data.status === "failed") {
+        setLoading(false);
+        return;
+      }
+
+      setLoading(false);
       pollTimeout = setTimeout(load, 3000);
     }
 
@@ -48,7 +63,7 @@ export default function ReviewPageClient({ id }: { id: string }) {
       isActive = false;
       clearTimeout(pollTimeout);
     };
-  }, [id]);
+  }, [id, supabase]);
 
   const parsed = useMemo(
     () => (review?.result_markdown ? parseReview(review.result_markdown) : null),
