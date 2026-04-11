@@ -37,20 +37,8 @@ export default function ReviewPageClient({ id }: { id: string }) {
     load();
     pollInterval = setInterval(load, 3000);
 
-    const channel = supabase
-      .channel(`review-${id}`)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "reviews", filter: `id=eq.${id}` },
-        (payload) => {
-          setReview((prev) => (prev ? { ...prev, ...payload.new } : null));
-        }
-      )
-      .subscribe();
-
     return () => {
       clearInterval(pollInterval);
-      supabase.removeChannel(channel);
     };
   }, [id]);
 
