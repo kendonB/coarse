@@ -6,6 +6,9 @@ export function createClient(reviewId?: string) {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     reviewId
       ? {
+          // Disable singleton when header varies by route param (review id).
+          // Otherwise the first header can be reused across SPA navigations.
+          isSingleton: false,
           global: {
             headers: { "x-review-id": reviewId },
           },
