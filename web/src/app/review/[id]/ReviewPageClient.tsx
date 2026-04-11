@@ -25,6 +25,7 @@ export default function ReviewPageClient({ id }: { id: string }) {
 
       if (!data) {
         setNotFound(true);
+        clearInterval(pollInterval);
       } else {
         setReview(data as Review);
         if (data.status === "done" || data.status === "failed") {
