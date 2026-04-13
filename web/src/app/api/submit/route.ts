@@ -7,6 +7,7 @@ import { ACTIVE_REVIEW_WINDOW_MS, MAX_CONCURRENT_REVIEWS } from "@/lib/reviewCap
 import { consumeReviewHandoffSecret } from "@/lib/routeHandoffAuth";
 
 export const maxDuration = 30;
+const MAX_CONCURRENT_REVIEWS = 20;
 const MODAL_TRIGGER_TIMEOUT_MS = 10_000;
 const MODAL_WEBHOOK_HOST_SUFFIX = "--coarse-review-run-review.modal.run";
 
@@ -94,6 +95,20 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(
       {
         error: statusRow.banner_message || "Submissions are temporarily paused. Please try again later or use the CLI: pip install coarse-ink",
+      },
+      { status: 503 },
+    );
+  }
+
+  const { count: activeReviews } = await supabaseAdmin
+    .from("reviews")
+    .select("id", { count: "exact", head: true })
+    .in("status", ["queued", "running"]);
+
+  if ((activeReviews ?? 0) >= MAX_CONCURRENT_REVIEWS) {
+    return NextResponse.json(
+      {
+        error: "We're seeing high traffic right now. Please try again in a few minutes.",
       },
       { status: 503 },
     );
