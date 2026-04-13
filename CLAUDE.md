@@ -5,8 +5,8 @@
 Free, open-source AI academic paper reviewer. The rough alternative to refine.ink.
 Users provide their own API keys and pay only the LLM provider directly (~$2-5 per review vs refine.ink's ~$50).
 
-**Package:** `coarse` (Python 3.12+, Pydantic, litellm, instructor)
-**Install:** `pip install coarse` / `pipx install coarse` / `uvx coarse paper.pdf`
+**Package:** `coarse-ink` on PyPI; import name is still `coarse` (Python 3.12+, Pydantic, litellm, instructor). The bare `coarse` name on PyPI is held by an unrelated package — see CHANGELOG Unreleased / #17.
+**Install:** `pip install coarse-ink` / `pipx install coarse-ink` / `uvx coarse-ink review paper.pdf`
 
 ## Python Environment
 
@@ -22,18 +22,22 @@ uv run python -m coarse paper.pdf
 
 ```
 paper (PDF, TXT, MD, TeX, DOCX, HTML, EPUB)
-    → [extraction.py]    Mistral OCR via OpenRouter / Docling fallback → PaperText (markdown)
+    → [extraction.py]    Mistral OCR (OpenRouter) → pdf-text (OpenRouter) → Docling → PaperText (markdown)
     → [extraction_qa.py] Vision LLM spot-check (auto-triggers on garbled text)
     → [structure.py]     Parse headings + LLM → PaperStructure (sections, math detection, domain)
     → [calibrate_domain] Domain-specific review criteria (parallel with literature)
     → [literature.py]    Perplexity Sonar Pro search, arXiv fallback (parallel with calibration)
-    → [overview panel]   3-judge panel → synthesized OverviewFeedback (4-6 macro issues)
+    → [overview.py]      Single overview agent → OverviewFeedback (macro issues)
+    → [completeness.py]  Structural-gap pass merged into overview
     → [section agents]   LLM → 15-25 detailed comments (1 per section, parallel)
     → [verify agent]     Adversarial proof verification (math sections only, chained)
-    → [crossref agent]   LLM → deduplicate, validate quotes, consistency
-    → [quote_verify.py]  Programmatic → fuzzy-match quotes (stricter for math)
-    → [critique agent]   LLM → self-critique quality gate, revise weak comments
-    → [quote_verify.py]  Programmatic → re-verify quotes (critique re-garbles via JSON)
+    → [cross_section.py] Results ↔ discussion synthesis (conditional)
+    → [editorial.py]     Primary filtering pass → dedup, contradiction, quality, ordering
+    → [crossref.py]      Legacy fallback if editorial fails
+    → [critique.py]      Legacy fallback if editorial fails
+    → [quote_verify.py]  Programmatic → exact/normalized/table-aware quote verification
+    → [quote_repair.py]  LLM → batched near-miss quote-anchor repair (bounded contexts only)
+    → [quote_verify.py]  Programmatic → re-verify repaired quotes before synthesis
     → [synthesis.py]     Deterministic → paper_review.md (refine.ink format)
 ```
 
@@ -44,10 +48,18 @@ src/coarse/
 ├── __init__.py              # __version__, review_paper()
 ├── __main__.py              # python -m coarse
 ├── cli.py                   # Typer CLI, progress display (rich)
+├── cli_review.py            # Standalone coarse-review CLI for headless local/handoff runs
+├── claude_code_client.py    # Back-compat re-export for headless Claude client helpers
 ├── config.py                # ~/.coarse/config.toml, API key management
 ├── cost.py                  # Cost estimation + user approval gate
+├── pipeline_spec.py         # Shared stage manifest for runtime + cost estimators
 ├── extraction.py            # PDF/TXT/MD/TeX/DOCX/HTML/EPUB → PaperText
+├── extraction_cache.py      # Extraction cache paths and cache read/write helpers
+├── extraction_formats.py    # Non-OpenRouter format-specific extraction backends
+├── extraction_openrouter.py # OpenRouter OCR/file-parser transport and response parsing
 ├── extraction_qa.py         # Post-extraction QA via vision LLM (Gemini Flash)
+├── headless_clients.py      # Claude/Codex/Gemini CLI-backed LLMClient replacements
+├── headless_review.py       # Shared entrypoint for headless CLI review runs
 ├── structure.py             # PaperText → PaperStructure (heading parse + math detection + LLM metadata)
 ├── quote_verify.py          # Post-processing quote verification (stricter for math)
 ├── models.py                # Model manifest — single source of truth for all model IDs
@@ -56,15 +68,22 @@ src/coarse/
 ├── prompts.py               # All prompt templates
 ├── types.py                 # Pydantic models
 ├── pipeline.py              # review_paper() orchestrator
+├── review_stages.py         # Stage-local review helpers used by pipeline.py
 ├── synthesis.py             # Review → markdown string
 ├── quality.py               # Quality eval against reference (dev only)
+├── recall.py                # Recall eval vs. ground-truth expert reviews (dev only)
 └── agents/
     ├── __init__.py
     ├── base.py              # ReviewAgent ABC + _build_messages helper + prompt caching
-    ├── overview.py          # 3-judge panel overview (macro-level feedback, 4-6 issues)
+    ├── overview.py          # Single-pass macro-level overview feedback
     ├── section.py           # Per-section detailed review
-    ├── crossref.py          # Cross-reference consistency
-    ├── critique.py          # Self-critique quality gate
+    ├── completeness.py      # Flags structural gaps and missing content
+    ├── cross_section.py     # Cross-section synthesis: discussion claims vs formal results
+    ├── editorial.py         # Merged filtering pass (dedup, contradiction, quality, ordering)
+    ├── crossref.py          # Cross-reference consistency (legacy, superseded by editorial)
+    ├── contradiction.py     # Flags comments contradicting the paper's contribution (legacy)
+    ├── critique.py          # Self-critique quality gate (legacy, superseded by editorial)
+    ├── quote_repair.py      # Batched near-miss quote re-anchoring before deterministic re-check
     ├── verify.py            # Adversarial proof verification (math sections)
     └── literature.py        # Literature search (Perplexity Sonar Pro, arXiv fallback)
 ```
@@ -158,6 +177,58 @@ CI (`.github/workflows/ci.yml`) runs on every push to `main` or `dev` and on eve
 5. **Don't over-engineer.** No abstractions for single-use code. No speculative features.
 6. **Prompts in prompts.py.** All LLM prompt templates go in one file, not scattered.
 7. **Structured output.** Use instructor + Pydantic models for all LLM responses.
+
+## Slash Commands
+
+Workflow automation commands live in `.claude/commands/`. Invoke with a `/`
+in chat.
+
+| Command | Purpose |
+|---|---|
+| `/security-review` | Fingerprint + pattern scan, env perms, key lifecycle audit, HTTP surface audit, prompt-injection check. Runs `scripts/security_scanner.py` + 3 parallel in-session agents. Blocking in `/pre-pr` Step 0. |
+| `/architecture-review` | Static import-graph scan (cycles, layer violations, oversized files) + 3 parallel agents (coupling, data flow, simplification). Escalates structural changes to user. |
+| `/module-review` | Focused per-module audit against the 11-point bug checklist. Supports `--module <path>`, `--changed`, `--all`, `--review-only`. |
+| `/pre-pr` | Blocking checklist before every push: security gate → diff capture → doc-sync → 5 parallel review agents → lint → tests → version → changelog → PR. |
+| `/dev-loop` | Supervised autonomous development loop (existing). |
+| `/worktree-start` | Create a worktree off `dev` for a new feature/fix (existing). |
+
+`scripts/security_scanner.py` is standalone — it runs in CI
+(`.github/workflows/security.yml`) and from `make security` without needing
+a Claude Code session.
+
+## Worktree Discipline
+
+Parallel work happens in ephemeral git worktrees under `/private/tmp/coarse-<slug>/`.
+The main repo stays on `dev` (or `main` for release branches) and is used
+only for read-only exploration.
+
+**Hard rules:**
+
+1. **Never edit files directly in the main worktree** during a feature task.
+   Use `/worktree-start` first, then all edits go through the full worktree path.
+2. **Full paths on every Edit/Write.** `/private/tmp/coarse-<slug>/src/coarse/foo.py`,
+   not `src/coarse/foo.py`. The shell cwd resets between `Bash` calls — `cd` alone
+   doesn't persist, so relative paths break silently.
+3. **Prefix every file-modifying `Bash` command** with
+   `cd /private/tmp/coarse-<slug> &&`.
+4. **Always `uv sync --extra dev`** in the new worktree before running tests or
+   scripts — bare `uv sync` misses the dev extras.
+5. **Merging back**: create PR from the worktree (`gh pr create --base dev`), merge
+   via `gh pr merge --squash`, then `git -C <main-repo> pull origin dev`, then
+   `git worktree remove /private/tmp/coarse-<slug>`.
+
+## Parallel Development
+
+coarse supports multiple concurrent Claude Code sessions as long as each
+session operates in its own worktree.
+
+- **Cap: 4 concurrent worktrees.** Beyond that, merge conflicts start to bite.
+- **Every branch references a GitHub issue.** `/worktree-start <issue-number>`.
+- **Worktree slug format:** `/private/tmp/coarse-<issue-number>-<short-slug>`.
+- **No two worktrees touch the same file** without coordinating through the
+  user — the autopilot doesn't resolve three-way merges.
+- **Cross-worktree state lives only in the repo** (git branches, PRs, issues).
+  Don't rely on `~/.coarse/` or any local path for cross-session coordination.
 
 ## Model Manifest (models.py)
 

@@ -1,6 +1,8 @@
 """Tests for coarse.extraction."""
+
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -10,7 +12,9 @@ import pytest
 from coarse.extraction import (
     SUPPORTED_EXTENSIONS,
     _estimate_tokens,
-    _extract_latex_regex,
+    _response_was_billed,
+    _scrub_secrets,
+    _strip_nul_bytes,
     compute_garble_ratio,
     extract_file,
     extract_text,
@@ -33,15 +37,19 @@ def _mock_ocr_response(pages_markdown: list[str]):
     """
     content_items = [{"type": "text", "text": md} for md in pages_markdown]
     data = {
-        "choices": [{
-            "message": {
-                "annotations": [{
-                    "type": "file",
-                    "file": {"content": content_items},
-                }],
-                "content": None,
+        "choices": [
+            {
+                "message": {
+                    "annotations": [
+                        {
+                            "type": "file",
+                            "file": {"content": content_items},
+                        }
+                    ],
+                    "content": None,
+                }
             }
-        }]
+        ]
     }
     resp = MagicMock()
     resp.status_code = 200
@@ -99,6 +107,60 @@ def test_extract_missing_file() -> None:
         extract_text("/nonexistent/path/file.pdf")
 
 
+# ---------------------------------------------------------------------------
+# NUL byte scrubbing (#62) — Postgres text columns reject \x00, and
+# PostgREST's JSON path rejects the 6-char escape \u0000 with SQLSTATE 22P05.
+# ---------------------------------------------------------------------------
+
+
+def test_strip_nul_bytes_removes_real_nul() -> None:
+    assert _strip_nul_bytes("before\x00after") == "beforeafter"
+
+
+def test_strip_nul_bytes_removes_literal_u0000_escape() -> None:
+    assert _strip_nul_bytes("before\\u0000after") == "beforeafter"
+
+
+def test_strip_nul_bytes_safe_on_empty() -> None:
+    assert _strip_nul_bytes("") == ""
+
+
+def test_strip_nul_bytes_leaves_normal_text_alone() -> None:
+    text = "# Paper\n\nRegular content with math $x^2$ and newlines.\n"
+    assert _strip_nul_bytes(text) == text
+
+
+def test_extract_text_strips_nul_byte_from_ocr_output(minimal_pdf: Path) -> None:
+    """If an OCR backend emits a NUL byte, extract_text must scrub it before
+    handing the markdown to the caller. Without this guard, the downstream
+    Supabase write crashes with Postgres 22P05 after the user has already
+    paid for the whole review pipeline.
+    """
+    pages = ["Page 1 content with \x00 NUL byte in the middle."]
+    with patch("requests.post", return_value=_mock_ocr_response(pages)):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
+            result = extract_text(minimal_pdf, use_cache=False)
+    assert "\x00" not in result.full_markdown
+    assert "Page 1 content with" in result.full_markdown
+    assert "NUL byte in the middle" in result.full_markdown
+
+
+def test_extract_text_strips_literal_u0000_escape_from_ocr_output(
+    minimal_pdf: Path,
+) -> None:
+    """Same defense for the 6-char literal \\u0000 sequence, which PostgREST
+    rejects at the JSON-decode layer even though it isn't a real NUL byte
+    until Postgres materializes it.
+    """
+    pages = ["Page with a literal \\u0000 escape in OCR output."]
+    with patch("requests.post", return_value=_mock_ocr_response(pages)):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
+            result = extract_text(minimal_pdf, use_cache=False)
+    assert "\\u0000" not in result.full_markdown
+    assert "literal" in result.full_markdown
+    assert "escape in OCR output" in result.full_markdown
+
+
 def test_token_estimate_heuristic() -> None:
     text = "a" * 400
     assert _estimate_tokens(text) == 100
@@ -146,13 +208,15 @@ def test_fallback_to_docling(minimal_pdf: Path) -> None:
     mock_docling.document_converter.DocumentConverter = mock_converter_cls
 
     # Ensure no OpenRouter key (resolve_api_key) so the OpenRouter backend skips
-    env_clean = {k: v for k, v in os.environ.items()
-                 if k not in ("OPENROUTER_API_KEY",)}
+    env_clean = {k: v for k, v in os.environ.items() if k not in ("OPENROUTER_API_KEY",)}
     with patch.dict(os.environ, env_clean, clear=True):
-        with patch.dict("sys.modules", {
-            "docling": mock_docling,
-            "docling.document_converter": mock_docling.document_converter,
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "docling": mock_docling,
+                "docling.document_converter": mock_docling.document_converter,
+            },
+        ):
             result = extract_text(minimal_pdf, use_cache=False)
 
     assert "Docling Fallback" in result.full_markdown
@@ -163,8 +227,7 @@ def test_all_backends_fail(minimal_pdf: Path) -> None:
     from coarse.types import ExtractionError
 
     # Ensure no OpenRouter key (resolve_api_key) so OpenRouter backend skips
-    env_clean = {k: v for k, v in os.environ.items()
-                 if k not in ("OPENROUTER_API_KEY",)}
+    env_clean = {k: v for k, v in os.environ.items() if k not in ("OPENROUTER_API_KEY",)}
     with patch.dict(os.environ, env_clean, clear=True):
         with patch.dict(
             "sys.modules",
@@ -187,6 +250,7 @@ def _mock_error_response(status: int, body: dict | str):
         resp.json.side_effect = ValueError(f"invalid json: {body}")
     if status >= 400:
         import requests as _r
+
         http_err = _r.HTTPError(f"{status} Error", response=resp)
         resp.raise_for_status.side_effect = http_err
     else:
@@ -201,9 +265,15 @@ def test_openrouter_ocr_http_200_with_error_body(minimal_pdf: Path) -> None:
     The error message is intentionally one that doesn't match any keyword in
     _classify_api_error, so we can see our own ExtractionError text pass through.
     """
-    error_response = _mock_error_response(200, {
-        "error": {"message": "file-parser plugin temporarily unavailable", "code": "plugin_error"},
-    })
+    error_response = _mock_error_response(
+        200,
+        {
+            "error": {
+                "message": "file-parser plugin temporarily unavailable",
+                "code": "plugin_error",
+            },
+        },
+    )
     with patch("requests.post", return_value=error_response):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
             with patch.dict(
@@ -220,9 +290,12 @@ def test_openrouter_ocr_http_200_with_error_body(minimal_pdf: Path) -> None:
 def test_openrouter_ocr_classifies_402_as_spend_limit(minimal_pdf: Path) -> None:
     """HTTP 200 with a credits-related error body should be classified into a
     user-friendly spend limit message by the extraction orchestrator."""
-    error_response = _mock_error_response(200, {
-        "error": {"message": "Insufficient credits", "code": 402},
-    })
+    error_response = _mock_error_response(
+        200,
+        {
+            "error": {"message": "Insufficient credits", "code": 402},
+        },
+    )
     with patch("requests.post", return_value=error_response):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
             with patch.dict(
@@ -251,14 +324,19 @@ def test_openrouter_ocr_malformed_annotation_falls_back_to_content(
 ) -> None:
     """Malformed annotations (e.g. missing 'file' key) should not crash;
     should fall back to message.content instead."""
-    resp = _mock_error_response(200, {
-        "choices": [{
-            "message": {
-                "annotations": [{"type": "file"}],  # missing 'file' key entirely
-                "content": "Fallback markdown text",
-            }
-        }]
-    })
+    resp = _mock_error_response(
+        200,
+        {
+            "choices": [
+                {
+                    "message": {
+                        "annotations": [{"type": "file"}],  # missing 'file' key entirely
+                        "content": "Fallback markdown text",
+                    }
+                }
+            ]
+        },
+    )
     with patch("requests.post", return_value=resp):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
             result = extract_text(minimal_pdf, use_cache=False)
@@ -267,9 +345,9 @@ def test_openrouter_ocr_malformed_annotation_falls_back_to_content(
 
 def test_openrouter_ocr_empty_content_raises(minimal_pdf: Path) -> None:
     """When both annotations and content are empty, raise ExtractionError."""
-    empty_resp = _mock_error_response(200, {
-        "choices": [{"message": {"annotations": [], "content": ""}}]
-    })
+    empty_resp = _mock_error_response(
+        200, {"choices": [{"message": {"annotations": [], "content": ""}}]}
+    )
     with patch("requests.post", return_value=empty_resp):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
             with patch.dict(
@@ -281,7 +359,8 @@ def test_openrouter_ocr_empty_content_raises(minimal_pdf: Path) -> None:
 
 
 def test_openrouter_ocr_retries_on_connection_error(
-    minimal_pdf: Path, mock_ocr_pages,
+    minimal_pdf: Path,
+    mock_ocr_pages,
 ) -> None:
     """Transient connection errors should be retried up to _OCR_MAX_RETRIES."""
     import requests as _r
@@ -322,7 +401,8 @@ def test_openrouter_ocr_gives_up_after_max_retries(minimal_pdf: Path) -> None:
 
 
 def test_openrouter_ocr_retries_on_503(
-    minimal_pdf: Path, mock_ocr_pages,
+    minimal_pdf: Path,
+    mock_ocr_pages,
 ) -> None:
     """HTTP 503 should trigger a retry; subsequent success should be returned."""
     success = _mock_ocr_response(mock_ocr_pages)
@@ -336,14 +416,18 @@ def test_openrouter_ocr_retries_on_503(
 
 
 def test_openrouter_ocr_retries_on_200_with_body_error_504(
-    minimal_pdf: Path, mock_ocr_pages,
+    minimal_pdf: Path,
+    mock_ocr_pages,
 ) -> None:
     """The real production failure mode: HTTP 200 with {error: {code: 504,
     message: "Timed out parsing tmp.pdf"}}. Should be retried just like raw 504."""
     success = _mock_ocr_response(mock_ocr_pages)
-    timeout_body = _mock_error_response(200, {
-        "error": {"message": "Timed out parsing tmp.pdf", "code": 504},
-    })
+    timeout_body = _mock_error_response(
+        200,
+        {
+            "error": {"message": "Timed out parsing tmp.pdf", "code": 504},
+        },
+    )
     # First call returns the 200-with-504 body, second call succeeds
     with patch("requests.post", side_effect=[timeout_body, success]):
         with patch("time.sleep"):
@@ -353,13 +437,17 @@ def test_openrouter_ocr_retries_on_200_with_body_error_504(
 
 
 def test_openrouter_ocr_retries_on_200_with_body_error_502(
-    minimal_pdf: Path, mock_ocr_pages,
+    minimal_pdf: Path,
+    mock_ocr_pages,
 ) -> None:
     """200 with {error: {code: 502}} is also a transient upstream error."""
     success = _mock_ocr_response(mock_ocr_pages)
-    bad_gateway = _mock_error_response(200, {
-        "error": {"message": "Upstream bad gateway", "code": 502},
-    })
+    bad_gateway = _mock_error_response(
+        200,
+        {
+            "error": {"message": "Upstream bad gateway", "code": 502},
+        },
+    )
     with patch("requests.post", side_effect=[bad_gateway, success]):
         with patch("time.sleep"):
             with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
@@ -370,11 +458,17 @@ def test_openrouter_ocr_retries_on_200_with_body_error_502(
 def test_openrouter_ocr_does_not_retry_on_200_with_body_error_402(
     minimal_pdf: Path,
 ) -> None:
-    """Non-retryable body codes (402 spend limit, 401 auth) should fail fast —
-    no point wasting retries on a billing problem."""
-    spend_limit = _mock_error_response(200, {
-        "error": {"message": "Insufficient credits", "code": 402},
-    })
+    """Non-retryable 402 body codes should not retry the same backend.
+
+    We still allow the extractor chain to try the next backend, but each
+    OpenRouter engine should only be attempted once for a hard billing error.
+    """
+    spend_limit = _mock_error_response(
+        200,
+        {
+            "error": {"message": "Insufficient credits", "code": 402},
+        },
+    )
     post_mock = MagicMock(return_value=spend_limit)
     with patch("requests.post", post_mock):
         with patch("time.sleep"):
@@ -385,17 +479,79 @@ def test_openrouter_ocr_does_not_retry_on_200_with_body_error_402(
                 ):
                     with pytest.raises(ExtractionError):
                         extract_text(minimal_pdf, use_cache=False)
-    # Exactly one call — no retry on 402
-    assert post_mock.call_count == 1
+    # Exactly one call per OpenRouter backend — no retries on 402.
+    assert post_mock.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (
+            402,
+            {"error": {"message": "Insufficient credits", "code": 402}},
+        ),
+        (
+            403,
+            {
+                "error": {
+                    "message": "Provider blocked by privacy settings",
+                    "code": "provider_forbidden",
+                    "metadata": {"provider": "mistral"},
+                }
+            },
+        ),
+    ],
+)
+def test_openrouter_ocr_falls_back_after_mistral_api_denial(
+    minimal_pdf: Path,
+    mock_ocr_pages,
+    caplog,
+    status: int,
+    body: dict,
+) -> None:
+    """402/403 on paid Mistral OCR should still try cheaper/offline fallback."""
+    first = _mock_error_response(status, body)
+    second = _mock_ocr_response(mock_ocr_pages)
+    posted_engines: list[str] = []
+
+    def spy_post(url, headers, json, timeout):  # noqa: A002
+        plugins = json.get("plugins") or []
+        engine = plugins[0].get("pdf", {}).get("engine") if plugins else None
+        posted_engines.append(engine)
+        return [first, second][len(posted_engines) - 1]
+
+    with caplog.at_level(logging.WARNING):
+        with patch("requests.post", side_effect=spy_post):
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
+                result = extract_text(minimal_pdf, use_cache=False)
+
+    assert "# Test Paper" in result.full_markdown
+    assert posted_engines == ["mistral-ocr", "pdf-text"]
+    assert "recoverable API denial" in caplog.text
+    if status == 402:
+        assert "Insufficient credits" in caplog.text
+    else:
+        assert "Provider blocked by privacy settings" in caplog.text
+        assert "provider_forbidden" in caplog.text
 
 
 def test_openrouter_ocr_retries_on_200_body_504_then_gives_up(
     minimal_pdf: Path,
 ) -> None:
-    """Persistent 200-with-504-body should exhaust retries and raise."""
-    timeout_body = _mock_error_response(200, {
-        "error": {"message": "Timed out parsing", "code": 504},
-    })
+    """Persistent 200-with-504-body should exhaust retries and raise.
+
+    Both OpenRouter extractors (mistral-ocr and pdf-text) go through the
+    same retry loop, so we expect 2 × (_OCR_MAX_RETRIES + 1) total posts
+    before the chain falls through to (disabled) Docling and raises.
+    """
+    from coarse.extraction import _OCR_MAX_RETRIES
+
+    timeout_body = _mock_error_response(
+        200,
+        {
+            "error": {"message": "Timed out parsing", "code": 504},
+        },
+    )
     post_mock = MagicMock(return_value=timeout_body)
     with patch("requests.post", post_mock):
         with patch("time.sleep"):
@@ -406,8 +562,221 @@ def test_openrouter_ocr_retries_on_200_body_504_then_gives_up(
                 ):
                     with pytest.raises(ExtractionError, match="Timed out parsing"):
                         extract_text(minimal_pdf, use_cache=False)
-    # _OCR_MAX_RETRIES + 1 = 6 total attempts
-    assert post_mock.call_count == 6
+    # Both mistral-ocr and pdf-text exhausted their retries.
+    assert post_mock.call_count == 2 * (_OCR_MAX_RETRIES + 1)
+
+
+def test_pdftext_fallback_runs_when_mistral_ocr_persistently_fails(
+    minimal_pdf: Path,
+    mock_ocr_pages,
+) -> None:
+    """When mistral-ocr exhausts retries with a transient body error, the
+    extractor chain should fall through to the pdf-text engine before Docling."""
+    from coarse.extraction import _OCR_MAX_RETRIES
+
+    timeout_body = _mock_error_response(
+        200,
+        {
+            "error": {"message": "Timed out parsing", "code": 504},
+        },
+    )
+    pdftext_success = _mock_ocr_response(mock_ocr_pages)
+
+    # Return timeout body for all mistral-ocr attempts, then success on the
+    # single pdf-text attempt that follows.
+    responses = [timeout_body] * (_OCR_MAX_RETRIES + 1) + [pdftext_success]
+    posted_engines: list[str] = []
+
+    def spy_post(url, headers, json, timeout):  # noqa: A002
+        plugins = json.get("plugins") or []
+        engine = plugins[0].get("pdf", {}).get("engine") if plugins else None
+        posted_engines.append(engine)
+        return responses[len(posted_engines) - 1]
+
+    with patch("requests.post", side_effect=spy_post):
+        with patch("time.sleep"):
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
+                result = extract_text(minimal_pdf, use_cache=False)
+
+    assert "# Test Paper" in result.full_markdown
+    # First N calls are mistral-ocr retries, last call is pdf-text fallback.
+    assert posted_engines[: _OCR_MAX_RETRIES + 1] == ["mistral-ocr"] * (_OCR_MAX_RETRIES + 1)
+    assert posted_engines[-1] == "pdf-text"
+
+
+def test_ocr_retry_stops_when_response_is_billed(minimal_pdf: Path) -> None:
+    """A 200-with-error-body that ALSO reports non-zero usage must not be
+    retried — retrying would double-charge the user for a billed error."""
+    billed_timeout = _mock_error_response(
+        200,
+        {
+            "error": {"message": "Timed out parsing", "code": 504},
+            "usage": {"total_tokens": 123, "total_cost": 0.0042},
+        },
+    )
+    mistral_post_count = {"n": 0}
+    pdftext_post_count = {"n": 0}
+
+    def spy_post(url, headers, json, timeout):  # noqa: A002
+        plugins = json.get("plugins") or []
+        engine = plugins[0].get("pdf", {}).get("engine") if plugins else None
+        if engine == "mistral-ocr":
+            mistral_post_count["n"] += 1
+        elif engine == "pdf-text":
+            pdftext_post_count["n"] += 1
+        return billed_timeout
+
+    with patch("requests.post", side_effect=spy_post):
+        with patch("time.sleep"):
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
+                with patch.dict(
+                    "sys.modules",
+                    {"docling": None, "docling.document_converter": None},
+                ):
+                    with pytest.raises(ExtractionError):
+                        extract_text(minimal_pdf, use_cache=False)
+
+    # Mistral OCR made exactly ONE billed call, then bailed out without retry.
+    assert mistral_post_count["n"] == 1
+    # pdf-text fallback is still tried — but the same billing guard applies
+    # there too, so it also bails after one call.
+    assert pdftext_post_count["n"] == 1
+
+
+# --- _response_was_billed direct unit tests ---
+
+
+def _billed_resp(body: object):
+    """Tiny fake Response whose .json() returns body (or raises if callable)."""
+    r = MagicMock()
+    if callable(body):
+        r.json.side_effect = body
+    else:
+        r.json.return_value = body
+    return r
+
+
+def test_response_was_billed_total_cost_positive():
+    assert _response_was_billed(_billed_resp({"usage": {"total_cost": 0.0042}})) is True
+
+
+def test_response_was_billed_cost_positive():
+    assert _response_was_billed(_billed_resp({"usage": {"cost": 0.01}})) is True
+
+
+def test_response_was_billed_total_tokens_positive():
+    assert _response_was_billed(_billed_resp({"usage": {"total_tokens": 5}})) is True
+
+
+def test_response_was_billed_all_zero():
+    body = {"usage": {"total_cost": 0, "cost": 0.0, "total_tokens": 0}}
+    assert _response_was_billed(_billed_resp(body)) is False
+
+
+def test_response_was_billed_missing_usage_field():
+    assert _response_was_billed(_billed_resp({"choices": []})) is False
+
+
+def test_response_was_billed_usage_is_not_dict():
+    assert _response_was_billed(_billed_resp({"usage": "free"})) is False
+    assert _response_was_billed(_billed_resp({"usage": None})) is False
+    assert _response_was_billed(_billed_resp({"usage": [1, 2, 3]})) is False
+
+
+def test_response_was_billed_json_raises():
+    def raise_value_error():
+        raise ValueError("not json")
+
+    assert _response_was_billed(_billed_resp(raise_value_error)) is False
+
+
+def test_response_was_billed_response_is_not_dict():
+    assert _response_was_billed(_billed_resp("literal string")) is False
+    assert _response_was_billed(_billed_resp([1, 2, 3])) is False
+
+
+def test_response_was_billed_rejects_bool_total_cost():
+    """bool is a subclass of int in Python — the guard must not be fooled
+    by a malformed `usage: {"total_cost": true}` response, since True would
+    coerce to >0 and kill retries on a free error body."""
+    body = {"usage": {"total_cost": True, "total_tokens": 0}}
+    assert _response_was_billed(_billed_resp(body)) is False
+
+
+def test_response_was_billed_rejects_bool_tokens():
+    body = {"usage": {"total_tokens": True}}
+    assert _response_was_billed(_billed_resp(body)) is False
+
+
+def test_response_was_billed_accepts_float_total_cost():
+    """Real OpenRouter responses report costs as floats; verify we handle them."""
+    body = {"usage": {"total_cost": 0.000001, "total_tokens": 0}}
+    assert _response_was_billed(_billed_resp(body)) is True
+
+
+# --- Backoff cap and fallback-order tests ---
+
+
+def test_ocr_backoff_waits_are_capped_at_max_backoff(minimal_pdf: Path) -> None:
+    """Verify _OCR_MAX_BACKOFF actually caps per-retry waits. Without this
+    test, someone could delete the `min(..., _OCR_MAX_BACKOFF)` in
+    _post_openrouter_ocr and every other test would still pass because
+    they all patch time.sleep to a no-op."""
+    from coarse.extraction import _OCR_MAX_BACKOFF, _OCR_MAX_RETRIES
+
+    timeout_body = _mock_error_response(
+        200,
+        {
+            "error": {"message": "Timed out parsing", "code": 504},
+        },
+    )
+    sleep_args: list[float] = []
+
+    def fake_sleep(seconds):
+        sleep_args.append(seconds)
+
+    with patch("requests.post", return_value=timeout_body):
+        with patch("time.sleep", side_effect=fake_sleep):
+            with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
+                with patch.dict(
+                    "sys.modules",
+                    {"docling": None, "docling.document_converter": None},
+                ):
+                    with pytest.raises(ExtractionError):
+                        extract_text(minimal_pdf, use_cache=False)
+
+    # Each engine (mistral-ocr, pdf-text) runs _OCR_MAX_RETRIES sleeps.
+    # Per-engine sequence: 1, 2, 4, 8, 16, 32, 32, 32, 32 (exponential then capped).
+    per_engine = sleep_args[:_OCR_MAX_RETRIES]
+    assert per_engine[:5] == [1.0, 2.0, 4.0, 8.0, 16.0]
+    assert all(w == _OCR_MAX_BACKOFF for w in per_engine[5:]), (
+        f"backoff not capped: tail is {per_engine[5:]}"
+    )
+    # Same pattern repeats for the pdf-text tier.
+    assert sleep_args[_OCR_MAX_RETRIES : 2 * _OCR_MAX_RETRIES] == per_engine
+
+
+def test_pdftext_is_not_called_when_mistral_ocr_succeeds(
+    minimal_pdf: Path,
+    mock_ocr_pages,
+) -> None:
+    """pdf-text is strictly a fallback — when mistral-ocr succeeds on the
+    first try, pdf-text must not be hit at all."""
+    success = _mock_ocr_response(mock_ocr_pages)
+    posted_engines: list[str] = []
+
+    def spy_post(url, headers, json, timeout):  # noqa: A002
+        plugins = json.get("plugins") or []
+        engine = plugins[0].get("pdf", {}).get("engine") if plugins else None
+        posted_engines.append(engine)
+        return success
+
+    with patch("requests.post", side_effect=spy_post):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-v1-test"}):
+            result = extract_text(minimal_pdf, use_cache=False)
+
+    assert "# Test Paper" in result.full_markdown
+    assert posted_engines == ["mistral-ocr"]
 
 
 def test_openrouter_ocr_does_not_retry_on_401(minimal_pdf: Path) -> None:
@@ -570,7 +939,9 @@ def test_extract_file_txt(tmp_path: Path) -> None:
 def test_extract_file_md(tmp_path: Path) -> None:
     """Markdown files preserve headings."""
     md = tmp_path / "paper.md"
-    md.write_text("# Introduction\n\nSome content.\n\n## Methods\n\nMore content.", encoding="utf-8")
+    md.write_text(
+        "# Introduction\n\nSome content.\n\n## Methods\n\nMore content.", encoding="utf-8"
+    )
     result = extract_file(md, use_cache=False)
     assert "# Introduction" in result.full_markdown
     assert "## Methods" in result.full_markdown
@@ -634,12 +1005,9 @@ def test_extract_file_caching(tmp_path: Path) -> None:
 
 def test_extract_latex_heading_conversion() -> None:
     """All LaTeX heading levels are correctly converted."""
-    result = _extract_latex_regex.__wrapped__(Path("/dev/null")) if hasattr(
-        _extract_latex_regex, "__wrapped__"
-    ) else None
     # Test the regex directly
-    from coarse.extraction import _LATEX_HEADING_RE, _LATEX_HEADING_LEVEL
-    import re
+
+    from coarse.extraction import _LATEX_HEADING_LEVEL, _LATEX_HEADING_RE
 
     test_cases = [
         ("\\section{Intro}", "# Intro"),
@@ -705,3 +1073,77 @@ def test_supported_extensions_includes_all_formats() -> None:
     """SUPPORTED_EXTENSIONS includes all documented formats."""
     for ext in [".pdf", ".txt", ".md", ".tex", ".latex", ".html", ".htm", ".docx", ".epub"]:
         assert ext in SUPPORTED_EXTENSIONS
+
+
+# ---------------------------------------------------------------------------
+# Secret scrubbing on the error path (issue #41)
+# ---------------------------------------------------------------------------
+
+
+def test_scrub_secrets_strips_bearer_and_keys() -> None:
+    """_scrub_secrets redacts bearer headers and provider API keys."""
+    # Fake fixture strings only — constructed so each line stays under the
+    # line-length limit and gets its own security scanner suppression.
+    openrouter = "sk-or-v1-abcdef0123456789abcdef0123456789"  # security: ignore
+    anthropic = "sk-ant-abcdef0123456789abcdef"  # security: ignore
+    groq = "gsk_abcdefghijklmnopqrst"  # security: ignore
+    perplexity = "pplx-abcdefghijklmnopqrst"  # security: ignore
+    google = "AIzaSyAbcdefghijklmnopqrstuvwxyz0123456"  # security: ignore
+    jwt = "eyJabcdefghijklmnopqrst"  # security: ignore
+    raw = (
+        f"401 Authorization: Bearer {openrouter} | "
+        f"also saw {anthropic} and {groq} "
+        f"and {perplexity} and {google} "
+        f"and {jwt}"
+    )
+    scrubbed = _scrub_secrets(raw)
+    assert "sk-or-v1-abcdef" not in scrubbed
+    assert "sk-ant-abcdef" not in scrubbed
+    assert "gsk_abcdef" not in scrubbed
+    assert "pplx-abcdef" not in scrubbed
+    assert "AIzaSy" not in scrubbed
+    assert "eyJabcdef" not in scrubbed
+    assert "Bearer sk-or-v1" not in scrubbed
+    assert "[key]" in scrubbed
+
+
+def test_extraction_error_message_is_scrubbed(tmp_path: Path, caplog) -> None:
+    """All-backends-failed path scrubs secrets from both the raised exception
+    AND the logger.warning side-effect. Without the caplog assertion, a
+    refactor that scrubs only at raise time could regress the log path."""
+    import logging
+
+    pdf = tmp_path / "paper.pdf"
+    # Minimal valid PDF magic so extract_text() proceeds past header check.
+    pdf.write_bytes(b"%PDF-1.4\n%fake content\n")
+
+    secret_bearer = "Bearer sk-or-v1-abcdef0123456789abcdef0123456789"  # security: ignore
+
+    def _boom(_path):
+        raise RuntimeError(f"upstream 401 with header {secret_bearer}")
+
+    # Force every backend to fail with the same leaky exception. Patching
+    # _classify_api_error to return None keeps the error path in the
+    # fall-through branch (not the immediate user-actionable raise).
+    with (
+        caplog.at_level(logging.WARNING, logger="coarse.extraction"),
+        patch("coarse.extraction._extract_mistral_openrouter", side_effect=_boom),
+        patch("coarse.extraction._extract_pdftext_openrouter", side_effect=_boom),
+        patch("coarse.extraction._extract_docling", side_effect=_boom),
+        patch("coarse.extraction._classify_api_error", return_value=None),
+    ):
+        with pytest.raises(ExtractionError) as exc_info:
+            extract_text(pdf, use_cache=False)
+
+    raised = str(exc_info.value)
+    assert "sk-or-v1-abcdef" not in raised
+    assert secret_bearer not in raised
+    assert "[key]" in raised
+
+    # Logger.warning path must also be scrubbed — the raised ExtractionError
+    # is one channel, the WARNING log is another, and a regression that only
+    # hardens one of them must fail.
+    log_text = caplog.text
+    assert "sk-or-v1-abcdef" not in log_text
+    assert secret_bearer not in log_text
+    assert "[key]" in log_text

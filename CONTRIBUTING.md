@@ -44,11 +44,14 @@ src/coarse/
 ├── quality.py          # Quality eval against reference review (dev only)
 └── agents/
     ├── base.py             # ReviewAgent ABC + prompt caching support
-    ├── overview.py         # 3-judge panel overview (macro-level feedback)
+    ├── overview.py         # Single-pass overview feedback
     ├── section.py          # Per-section detailed review
-    ├── crossref.py         # Cross-reference deduplication
-    ├── critique.py         # Self-critique quality gate
+    ├── completeness.py     # Structural-gap assessment merged into overview
+    ├── editorial.py        # Primary filtering pass for detailed comments
+    ├── crossref.py         # Legacy cross-reference fallback
+    ├── critique.py         # Legacy critique fallback
     ├── verify.py           # Adversarial proof verification for math sections
+    ├── cross_section.py    # Results vs discussion synthesis
     └── literature.py       # Literature search (Perplexity Sonar Pro, arXiv fallback)
 ```
 
@@ -62,14 +65,16 @@ paper.pdf (or .txt, .md, .tex, .docx, .html, .epub)
   -> calibrate_domain \
                        |  Parallel: domain-specific criteria + literature search
   -> search_literature /  (Perplexity Sonar Pro, arXiv fallback)
-  -> overview panel       3-judge panel with different personas -> synthesized OverviewFeedback
+  -> overview.py          Single overview agent -> OverviewFeedback
+  -> completeness.py      Structural-gap pass merged into overview
   -> section agents   \
                        |  Parallel: detailed comments + adversarial proof verification
   -> proof verify      /  (math sections only)
-  -> crossref agent      Deduplicate, validate quotes, consistency
-  -> quote_verify.py     Programmatic fuzzy-match quotes against text
-  -> critique agent      Self-critique quality gate, revise weak comments
-  -> quote_verify.py     Re-verify (critique can re-garble quotes via JSON)
+  -> cross_section.py     Results vs discussion synthesis (conditional)
+  -> editorial.py         Primary dedup/consistency/quality filter
+  -> crossref agent       Legacy fallback if editorial fails
+  -> critique agent      Legacy fallback if editorial fails
+  -> quote_verify.py      Programmatic fuzzy-match quotes against text
   -> synthesis.py        Deterministic render -> paper_review.md
 ```
 
@@ -133,12 +138,31 @@ Version bumps happen **only on release PRs from `dev` to `main`**. Feature PRs i
 
 ### Pre-PR checklist
 
+If you use Claude Code, run `/pre-pr` — it runs every check below plus the
+security scanner and five parallel review agents. Otherwise, run them
+manually:
+
+- [ ] `python3 scripts/security_scanner.py` reports no CRITICAL findings (or `make security`)
+- [ ] `bash scripts/doc-sync-check.sh` exits 0
 - [ ] `uv run ruff check src/ tests/` passes (or `make lint`)
 - [ ] `uv run pytest tests/ -v` passes (or `make test`)
 - [ ] `CHANGELOG.md` updated under `## Unreleased` in the appropriate subsection (`Added` / `Changed` / `Fixed` / `Removed`)
 - [ ] New code has tests in `tests/test_<module>.py`
 - [ ] Commit messages follow conventional commits
 - [ ] PR targets `dev` (not `main`) — unless you're the maintainer cutting a release
+
+### Claude Code slash commands
+
+Workflow automation lives in `.claude/commands/`. Run with a `/` in chat.
+
+| Command | When to use it |
+|---|---|
+| `/pre-pr` | Before every push. Security gate + doc sync + 5 parallel review agents + lint/tests/changelog. |
+| `/security-review` | Standalone security audit. Blocking gate inside `/pre-pr`; also runs in CI via `.github/workflows/security.yml`. |
+| `/architecture-review` | After a big refactor or new agent. Import graph + layer check + 3 parallel structural agents. |
+| `/module-review` | Focused audit of one module against the 11-point bug checklist. Supports `--module <path>`, `--changed`, `--all`. |
+| `/worktree-start` | Create a new worktree off `dev` for a feature/fix. |
+| `/dev-loop` | Supervised autonomous development loop for component builds. |
 
 ## Submitting a PR
 
@@ -158,7 +182,18 @@ When `dev` is ready to release:
 3. Commit: `git commit -m "release: vX.Y.Z"`.
 4. Open a PR from `dev` → `main` titled `release: vX.Y.Z`.
 5. After merge, tag the merge commit on `main`: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
-6. Fast-forward `dev` to `main` so both branches line up for the next cycle: `git checkout dev && git merge --ff-only main && git push`.
+6. Pushing the tag triggers `.github/workflows/release.yml`, which runs the test suite, verifies the tag matches `pyproject.toml` and `__init__.py`, builds the sdist + wheel with `uv build`, and publishes to PyPI via Trusted Publishing (OIDC). No API token is stored in the repo — the `publish` job runs in the `pypi` GitHub environment and mints a short-lived OIDC token that PyPI accepts.
+7. Fast-forward `dev` to `main` so both branches line up for the next cycle: `git checkout dev && git merge --ff-only main && git push`.
+
+**First-time PyPI setup (one-time per project):** on PyPI, go to `Manage → Publishing → Add a new pending publisher` and register:
+
+- PyPI Project Name: `coarse-ink`
+- Owner: `Davidvandijcke`
+- Repository name: `coarse`
+- Workflow name: `release.yml`
+- Environment name: `pypi`
+
+Until this is registered, the `publish` job will fail on the first run with `invalid-publisher`. After registering, re-run the failed workflow (or push a new tag) and the publish will succeed.
 
 ## Reporting issues
 

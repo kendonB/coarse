@@ -4,6 +4,12 @@ on:
     - cron: '0 8 * * *'  # 8 AM UTC daily
   workflow_dispatch: {}   # Allow manual trigger
 
+# Opt JavaScript-based actions into Node.js 24 ahead of GitHub's
+# 2026-06-02 default flip / 2026-09-16 Node 20 removal. See the note
+# on `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` in ci.yml.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -36,7 +42,13 @@ jobs:
           ALERT="none"
           BODY=""
 
-          if [ "$DAILY" -gt 40 ] 2>/dev/null; then
+          # 200 reviews/day ≈ 400 emails, leaving 100-email headroom below
+          # Gmail's 500/day sender cap. The frontend email-capacity gate in
+          # web/src/lib/emailCapacity.ts kicks in harder at 240; this warning
+          # gives the maintainer time to react before the gate auto-disables
+          # the email input for users. Old threshold (40) was from the pre-
+          # launch era when volume was <1 review/day.
+          if [ "$DAILY" -gt 200 ] 2>/dev/null; then
             ALERT="warning"
             BODY="Daily reviews ($DAILY) approaching Gmail 500 emails/day limit.\n\n"
           fi
@@ -70,7 +82,7 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_KEY }}" \
             -H "Content-Type: application/json" \
             -H "Prefer: return=minimal" \
-            -d '{"accepting_reviews": false, "banner_message": "Monthly capacity reached. Please use the CLI: pip install coarse", "updated_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
+            -d '{"accepting_reviews": false, "banner_message": "Monthly capacity reached. Please use the CLI: pip install coarse-ink", "updated_at": "'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'"}'
           echo "Submissions auto-paused."
 
       - name: Send alert email

@@ -13,6 +13,7 @@ create table reviews (
   paper_title text,
   model text,
   domain text,
+  taxonomy text,
   result_markdown text,
   paper_markdown text,
   cost_usd numeric(8,4),
@@ -41,6 +42,37 @@ create table review_emails (
 
 -- RLS: no anon policy = deny all. Only service_role (which bypasses RLS) can read/write.
 alter table review_emails enable row level security;
+
+-- ============================================================================
+-- Review secrets (transient user API keys, consumed once by the Modal worker)
+-- ============================================================================
+
+-- Same deny-all RLS model as review_emails. The Modal worker reads + deletes
+-- the row in one shot via _fetch_and_consume_user_key(); a GitHub Actions cron
+-- sweeps any rows older than 3 hours as a safety net.
+create table review_secrets (
+  review_id uuid primary key references reviews(id) on delete cascade,
+  user_api_key text not null check (length(user_api_key) > 0),
+  created_at timestamptz default now()
+);
+
+alter table review_secrets enable row level security;
+
+create index idx_review_secrets_created_at on review_secrets (created_at);
+
+-- ============================================================================
+-- Review handoff secrets (browser proof-of-possession for follow-up routes)
+-- ============================================================================
+
+create table review_handoff_secrets (
+  review_id uuid primary key references reviews(id) on delete cascade,
+  secret_hash text not null check (length(secret_hash) = 64),
+  created_at timestamptz default now()
+);
+
+alter table review_handoff_secrets enable row level security;
+
+create index idx_review_handoff_secrets_created_at on review_handoff_secrets (created_at);
 
 -- ============================================================================
 -- Storage buckets
@@ -126,7 +158,7 @@ alter publication supabase_realtime add table reviews;
 -- Singleton row: manual kill switch + banner message for the web frontend.
 -- Flip from the Supabase SQL editor:
 --   UPDATE system_status SET accepting_reviews = false,
---     banner_message = 'High traffic — use the CLI: pip install coarse',
+--     banner_message = 'High traffic — use the CLI: pip install coarse-ink',
 --     updated_at = now() WHERE id = 1;
 create table system_status (
   id int primary key default 1 check (id = 1),

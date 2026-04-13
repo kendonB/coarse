@@ -15,7 +15,7 @@ Don't want to run it locally? Use the [web interface](https://coarse.vercel.app/
 Get an API key from [OpenRouter](https://openrouter.ai/keys) (free to sign up), then:
 
 ```bash
-uvx coarse review paper.pdf --api-key sk-or-v1-YOUR_KEY
+uvx coarse-ink review paper.pdf --api-key sk-or-v1-YOUR_KEY
 ```
 
 That's it. The review is written to `paper_review.md` in the current directory.
@@ -35,8 +35,14 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 `uvx` runs coarse in a temporary environment with no permanent install. To install permanently:
 
 ```bash
-uv tool install coarse    # or: pip install coarse
+uv tool install coarse-ink    # or: pip install coarse-ink
 ```
+
+> **Why `coarse-ink` and not `coarse`?** The bare `coarse` name on PyPI is
+> held by an unrelated package, so we ship under `coarse-ink`. The Python
+> import name (`import coarse`) and the `coarse` CLI command are unchanged
+> — installing `coarse-ink` puts both `coarse` and `coarse-ink` on your
+> PATH.
 
 ### Save your API key
 
@@ -54,8 +60,8 @@ PDF, TXT, Markdown, LaTeX, DOCX, HTML, and EPUB. PDFs use Mistral OCR; other for
 Docling (if installed) with lightweight fallbacks. Install optional format support:
 
 ```bash
-pip install coarse[formats]   # DOCX, HTML, EPUB fallbacks
-pip install coarse[docling]   # Docling for PDF/DOCX/HTML/LaTeX
+pip install coarse-ink[formats]   # DOCX, HTML, EPUB fallbacks
+pip install coarse-ink[docling]   # Docling for PDF/DOCX/HTML/LaTeX
 ```
 
 ## How it works
@@ -66,23 +72,25 @@ paper.pdf (or .txt, .md, .tex, .docx, .html, .epub)
   -> Vision LLM spot-check               Optional QA (auto-triggers on garbled text)
   -> Structure analysis                   Parse sections, detect math content, classify domain
   -> Domain calibration + lit search      Parallel: domain-specific criteria + Perplexity Sonar Pro
-  -> 3-judge overview panel               Three personas review full paper, then synthesize
+  -> Overview agent                       Single macro-level review pass
+  -> Completeness agent                   Structural-gap pass merged into overview
   -> Section agents + proof verification  Parallel: 15-25 detailed comments; math sections get adversarial proof check
-  -> Cross-reference agent                Deduplicate, validate consistency
+  -> Cross-section synthesis              Results vs discussion consistency check
+  -> Editorial filter                     Primary deduplication, contradiction, and quality pass
+  -> Legacy crossref/critique fallback    Only used if the editorial pass fails
   -> Quote verification                   Fuzzy-match quotes against paper text (stricter for math)
-  -> Self-critique agent                  Quality gate, revise weak comments
-  -> Quote re-verification               Fix any quotes garbled during critique
   -> Synthesis                            Render final paper_review.md
 ```
 
 The pipeline extracts text, classifies the paper's domain and structure, then generates
 domain-specific review criteria and searches for related literature (via
-[Perplexity Sonar Pro](https://docs.perplexity.ai/), with arXiv fallback). A 3-judge
-overview panel produces macro-level feedback from different perspectives, which is then
-synthesized into a unified assessment. Section agents run in parallel, with an adversarial
-proof verification pass for math-heavy sections. A cross-reference pass deduplicates comments
-and a self-critique agent acts as a quality gate. All quotes are programmatically verified
-against the source text, with stricter thresholds for math content.
+[Perplexity Sonar Pro](https://docs.perplexity.ai/), with arXiv fallback). A single
+overview pass produces macro-level feedback, completeness can add structural gaps, and
+section agents run in parallel with adversarial proof verification for math-heavy sections.
+A conditional cross-section pass checks whether discussion claims are supported by formal
+results, and an editorial pass is the primary deduplication and quality gate. All quotes
+are programmatically verified against the source text, with stricter thresholds for math
+content.
 
 ## Model selection
 
@@ -110,7 +118,7 @@ step-by-step setup instructions, see the [API key guide](https://coarse.vercel.a
 > **Set your OpenRouter per-key spend limit to at least $10** (ideally matching
 > the `max_cost_usd` default of `$10`). If the limit is hit mid-review the run
 > will fail and you'll need to raise the limit and resubmit. Cost estimates
-> shown before each review are approximate (~15% buffer) — they're a guide,
+> shown before each review are approximate (~30% buffer) — they're a guide,
 > not a hard ceiling, so leave yourself headroom.
 
 For direct provider access to chat models (lower latency, separate billing),
@@ -131,21 +139,21 @@ you can set the provider-specific key instead:
 ## Cost
 
 coarse estimates cost before running and asks for confirmation. The estimate includes a
-15% buffer to account for variance.
+30% buffer to account for variance.
 
 | Paper length    | Typical cost  |
 |-----------------|---------------|
 | Short (< 20pp)  | $0.25 - $0.50 |
 | Long (30+ pp)   | $0.50 - $1    |
 
-**Actual costs can run up to ~2× the estimate** on complex papers depending on
-model reasoning depth, critique agent rewrites, and proof-verification chains
-for math-heavy sections. The 15% buffer is a first approximation, not a ceiling.
+**Actual costs can run materially above the estimate** on complex papers depending on
+model reasoning depth, editorial filtering behavior, and proof-verification chains
+for math-heavy sections. The built-in buffer is conservative, not a ceiling.
 Make sure your OpenRouter per-key spend limit has headroom above the estimate.
 
 The default spending cap is **$10 per review** (`max_cost_usd` in config). Use `--yes` to skip the
 confirmation prompt. Use `--no-qa` to skip the post-extraction quality check (vision LLM).
-Scanned PDFs are supported via Docling's built-in OCR (`pip install coarse[docling]`).
+Scanned PDFs are supported via Docling's built-in OCR (`pip install coarse-ink[docling]`).
 
 You can also load API keys from any `.env` file with `--env-file path/to/.env`.
 
@@ -226,7 +234,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, project structure,
 
 ## Version
 
-1.1.0
+1.2.2
 
 ## License
 
