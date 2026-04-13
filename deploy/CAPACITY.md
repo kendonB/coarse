@@ -11,7 +11,7 @@ Run this in the **Supabase SQL Editor** (no deploy needed):
 ```sql
 UPDATE system_status
 SET accepting_reviews = false,
-    banner_message = 'We are at capacity right now. Please use the command-line version: pip install coarse',
+    banner_message = 'We are at capacity right now. Please use the command-line version: pip install coarse-ink',
     updated_at = now()
 WHERE id = 1;
 ```
@@ -77,7 +77,7 @@ UPDATE reviews SET paper_markdown = null WHERE completed_at < now() - interval '
 
 **Expand**: Upgrade to Vercel Pro ($20/month) for 1 TB bandwidth and 60-second function timeout.
 
-**Emergency**: Pause submissions via SQL above. The CLI (`pip install coarse`) works independently of the web app.
+**Emergency**: Pause submissions via SQL above. The CLI (`pip install coarse-ink`) works independently of the web app.
 
 ---
 
@@ -105,7 +105,14 @@ The daily monitoring cron (`.github/workflows/monitor.yml`) runs at 8 AM UTC and
 |-----------|--------|
 | Monthly reviews > 300 | Warning email — approaching Modal free tier |
 | Monthly reviews > 800 | Auto-pauses submissions + alert email |
-| Daily reviews > 40 | Warning email — approaching Gmail daily limit |
+| Daily reviews > 200 | Warning email — approaching Gmail daily limit (see note below) |
+
+Note on the daily threshold: each review sends up to 2 emails (confirm +
+complete), so 200 reviews/day ≈ 400 emails, leaving a ~100-email buffer
+below Gmail's free-tier 500/day sender cap. The frontend also has a hard
+cutoff at 240 reviews in `web/src/lib/emailCapacity.ts` that disables the
+email input in the submit form — this cron warns the maintainer first so
+there's time to react before the gate auto-fires.
 
 The cron uses these GitHub repo secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`, `ALERT_EMAIL`.
 

@@ -6,7 +6,15 @@ dist/
 .DS_Store
 .env
 .coarse/
-.claude/
+
+# Ignore everything inside .claude/ except the shared slash commands,
+# agent definitions, hook scripts, and project-level settings, which are
+# team-wide workflow tooling. Keep .claude/settings.local.json ignored.
+.claude/*
+!.claude/commands
+!.claude/agents
+!.claude/hooks
+!.claude/settings.json
 CLAUDE.md
 *.pdf
 !data/**/*.pdf

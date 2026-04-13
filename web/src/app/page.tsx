@@ -5,7 +5,26 @@ import { useDropzone } from "react-dropzone";
 import { useRouter } from "next/navigation";
 import { CharcoalRule, HeroMarks } from "@/components/charcoal";
 import ModelPicker from "@/components/ModelPicker";
+import OpenRouterLoginButton from "@/components/OpenRouterLoginButton";
 import { estimateTokensFromPdf, estimateTokensFromText, estimateTokensFromDocx, estimateTokensFromEpub, getModelPricing, estimateReviewCost } from "@/lib/estimateCost";
+import { beginLogin, completeLogin, loadStoredKey, saveStoredKey, clearStoredKey } from "@/lib/openrouterAuth";
+import {
+  type ChatHost,
+  type CliHandoffBundle,
+  type EffortLevel,
+  HOST_LABELS,
+  HOST_GLYPHS,
+  HOST_CLI_NAME,
+  HOST_DEFAULT_MODELS,
+  HOST_INSTALL_URL,
+  HOST_LAUNCH_LABEL,
+  HOST_LAUNCH_HINT,
+  buildLaunchUrl,
+  EFFORT_LEVELS,
+  mintCliHandoff,
+  buildCliCommands,
+  buildAgentPrompt,
+} from "@/lib/mcpHandoff";
 
 /* ── Split-flap AI name display ────────────────────────────── */
 const AI_NAMES = ["Claude,", "Gemini,", "Qwen,", "ChatGPT,", "DeepSeek,", "Kimi,", "Grok,", "MiniMax,", "Mistral,", "Llama,"];
@@ -60,6 +79,65 @@ function SplitFlap() {
   );
 }
 
+/* ── Copy-to-clipboard code block ────────────────────────── */
+function CodeBlock({ text, maxHeight }: { text: string; maxHeight?: string }) {
+  const [copied, setCopied] = useState(false);
+  // Wrap the scroll area in a relative container so the copy button
+  // can be absolutely positioned over the top-right and stay visible
+  // regardless of scroll position.
+  return (
+    <div style={{ position: "relative" }}>
+      <button
+        type="button"
+        onClick={() => {
+          navigator.clipboard.writeText(text).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }).catch(() => {});
+        }}
+        style={{
+          position: "absolute",
+          top: "0.4rem",
+          right: "0.4rem",
+          zIndex: 2,
+          background: copied ? "var(--yellow-chalk)" : "var(--tray)",
+          color: copied ? "var(--board)" : "var(--chalk-bright)",
+          border: "none",
+          borderRadius: "2px",
+          padding: "0.2rem 0.55rem",
+          fontSize: "0.75rem",
+          fontFamily: "var(--font-chalk)",
+          cursor: "pointer",
+          transition: "background 0.15s, color 0.15s",
+        }}
+      >
+        {copied ? "copied ✓" : "copy"}
+      </button>
+      <div
+        style={{
+          background: "var(--board)",
+          border: "1px solid var(--tray)",
+          borderLeft: "2px solid var(--yellow-chalk)",
+          borderRadius: "2px",
+          padding: "0.65rem 0.85rem",
+          paddingRight: "4.5rem",
+          fontFamily: "var(--font-space-mono), monospace",
+          fontSize: "0.82rem",
+          color: "var(--chalk-bright)",
+          lineHeight: 1.5,
+          maxHeight: maxHeight ?? undefined,
+          overflowY: maxHeight ? "auto" : undefined,
+          overflowX: "auto",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+        }}
+      >
+        {text}
+      </div>
+    </div>
+  );
+}
+
 /* ── Header ───────────────────────────────────────────────── */
 function Header() {
   return (
@@ -106,6 +184,18 @@ function Header() {
           }}
         >
           setup
+        </a>
+        <a
+          href="/mcp"
+          style={{
+            fontFamily: "var(--font-chalk)",
+            fontSize: "1.05rem",
+            color: "var(--dust)",
+            textDecoration: "none",
+            transition: "color 0.2s",
+          }}
+        >
+          mcp
         </a>
         <a
           href="/compare"
@@ -161,20 +251,88 @@ export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [email, setEmail] = useState("");
   const [apiKey, setApiKey] = useState("");
-  const [model, setModel] = useState("anthropic/claude-sonnet-4.6");
+  const [model, setModel] = useState("anthropic/claude-opus-4.6");
+  const [authorNotes, setAuthorNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [keyNotice, setKeyNotice] = useState<string | null>(null);
   const [lookupKey, setLookupKey] = useState("");
   const [costEstimate, setCostEstimate] = useState<number | null>(null);
   const [costLoading, setCostLoading] = useState(false);
   const tokenCacheRef = useRef<{ name: string; size: number; tokens: number } | null>(null);
+  const oauthConsumedRef = useRef(false);
   const [systemStatus, setSystemStatus] = useState<{
     accepting: boolean; banner: string | null; activeReviews: number; capacity: number;
+    emailCapacityReached?: boolean;
   } | null>(null);
+
+  // CLI handoff state machine:
+  //
+  //   idle → extracting → ready
+  //           │
+  //           └─► failed
+  //
+  //  - idle: user hasn't clicked the subscription button yet
+  //  - extracting: presign + upload + /api/cli-handoff in flight
+  //  - ready: clipboard prompt and host launch affordances are ready
+  //  - failed: upload or handoff errored; show error in form
+  type HandoffPhase = "idle" | "extracting" | "ready" | "failed";
+  const [mcpPickerOpen, setMcpPickerOpen] = useState(false);
+  const [handoffPhase, setHandoffPhase] = useState<HandoffPhase>("idle");
+  const [handoffState, setHandoffState] = useState<{
+    paperId: string; host: ChatHost;
+  } | null>(null);
+  const [handoffMessage, setHandoffMessage] = useState<string>("");
+  const [handoffBundle, setHandoffBundle] = useState<CliHandoffBundle | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string>("");
+  const [selectedEffort, setSelectedEffort] = useState<EffortLevel>("high");
+  const [showManualCommands, setShowManualCommands] = useState<boolean>(false);
+  const [launchStatus, setLaunchStatus] = useState<string>("");
 
   // Fetch system capacity status on mount
   useEffect(() => {
     fetch("/api/status").then(r => r.json()).then(setSystemStatus).catch(() => {});
+  }, []);
+
+  // Hydrate a tab-scoped OpenRouter key and handle OAuth callback (?code=...).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    const { key: stored, migratedFromLocalStorage } = loadStoredKey();
+
+    if (migratedFromLocalStorage) {
+      setKeyNotice(
+        "Moved your saved OpenRouter key into tab-only storage. It will clear when you close this tab.",
+      );
+    }
+
+    if (!code) {
+      if (stored) setApiKey(stored);
+      return;
+    }
+
+    if (oauthConsumedRef.current) return;
+    oauthConsumedRef.current = true;
+    // Strip ?code= immediately so a mid-flight reload won't re-submit a consumed code.
+    window.history.replaceState({}, "", window.location.pathname);
+
+    completeLogin(code)
+      .then((key) => {
+        setApiKey(key);
+        setKeyNotice(null);
+        try {
+          saveStoredKey(key);
+        } catch {
+          setError(
+            "Logged in, but couldn't keep the key in this tab. You'll need to paste it again if this page reloads.",
+          );
+        }
+      })
+      .catch((err) => {
+        console.error("OpenRouter login failed", err);
+        setError("OpenRouter login failed. Please try again or paste a key manually.");
+        if (stored) setApiKey(stored);
+      });
   }, []);
 
   const onDrop = useCallback((accepted: File[]) => {
@@ -191,11 +349,11 @@ export default function Home() {
       try {
         // Cache token count so model switches don't re-parse the file
         let tokens: number;
+        const ext = file.name.toLowerCase().split(".").pop();
         const cached = tokenCacheRef.current;
         if (cached && cached.name === file.name && cached.size === file.size) {
           tokens = cached.tokens;
         } else {
-          const ext = file.name.toLowerCase().split(".").pop();
           if (ext === "pdf") {
             tokens = await estimateTokensFromPdf(file);
           } else if (ext === "docx") {
@@ -212,7 +370,10 @@ export default function Home() {
         if (cancelled) return;
 
         if (pricing) {
-          setCostEstimate(estimateReviewCost(tokens, pricing));
+          // Pass modelId for reasoning-model overhead detection and
+          // isPdf to gate the extraction_qa stage — matches the Python
+          // cost gate's behavior in build_cost_estimate().
+          setCostEstimate(estimateReviewCost(tokens, pricing, model, ext === "pdf"));
         } else {
           setCostEstimate(null);
         }
@@ -244,7 +405,9 @@ export default function Home() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!file || !email || !apiKey) return;
+    if (handoffPhase !== "idle") return;
+    if (!file || !apiKey) return;
+    if (!email && !(systemStatus?.emailCapacityReached === true)) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -258,7 +421,7 @@ export default function Home() {
         const data = await presignResp.json();
         throw new Error(data.error || "Failed to prepare upload");
       }
-      const { id, storagePath, signedUrl, token } = await presignResp.json();
+      const { id, storagePath, signedUrl, token, handoffSecret } = await presignResp.json();
 
       // Step 2: Upload file directly to Supabase Storage (bypasses Vercel 4.5MB limit)
       const uploadResp = await fetch(signedUrl, {
@@ -283,6 +446,8 @@ export default function Home() {
           api_key: apiKey,
           model,
           storage_path: storagePath,
+          author_notes: authorNotes || undefined,
+          handoff_secret: handoffSecret,
         }),
       });
       if (!submitResp.ok) {
@@ -296,8 +461,152 @@ export default function Home() {
     }
   }
 
+  /**
+   * Route this review to one of the user's local coding-agent hosts using the
+   * CLI handoff flow.
+   *
+   * The browser uploads the source file, receives a paper-scoped handoff URL,
+   * copies the review prompt to the clipboard, and then lets the local
+   * `coarse-review --handoff ...` command do extraction and finalization on the
+   * user's machine with the user's own OpenRouter key and coding-agent
+   * subscription.
+   */
+  async function handleMcpHandoff(host: ChatHost) {
+    if (!file) return;
+    if (handoffPhase === "extracting") return;
+    // Reset any previous handoff so the user can switch hosts.
+    resetHandoff();
+    setError(null);
+    setMcpPickerOpen(false);
+    setHandoffPhase("extracting");
+    setHandoffMessage("Uploading paper...");
+    setHandoffBundle(null);
+
+    try {
+      // Step 1: presign + upload (same path as the OpenRouter flow).
+      const presignResp = await fetch("/api/presign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name }),
+      });
+      if (!presignResp.ok) {
+        const data = await presignResp.json();
+        throw new Error(data.error || "Failed to prepare upload");
+      }
+      const { id, signedUrl, handoffSecret } = await presignResp.json();
+
+      const uploadResp = await fetch(signedUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": file.type || "application/octet-stream",
+          "x-upsert": "true",
+        },
+        body: file,
+      });
+      if (!uploadResp.ok) {
+        throw new Error("File upload failed — please try again");
+      }
+
+      // Step 2: mint CLI handoff token. No server-side extraction — the
+      // user's local `coarse-review` command downloads the raw PDF and
+      // does Mistral OCR locally with their own OpenRouter key, then
+      // POSTs the rendered review back to /api/mcp-finalize.
+      setHandoffMessage("Preparing handoff...");
+      const bundle = await mintCliHandoff(id, host, handoffSecret);
+
+      // Step 3: defaults for the modal dropdowns.
+      setSelectedModel(HOST_DEFAULT_MODELS[host][0]);
+      setSelectedEffort("high");
+
+      setHandoffBundle(bundle);
+      setHandoffState({ paperId: id, host });
+      setHandoffPhase("ready");
+      setHandoffMessage("");
+    } catch (err) {
+      setHandoffPhase("failed");
+      const msg = err instanceof Error ? err.message : "Handoff failed";
+      setError(msg);
+      setHandoffMessage("");
+    }
+  }
+
+  /**
+   * Primary launch action: copy the run command to the clipboard,
+   * then open the host's web interface (if it has one) in a new tab.
+   *
+   * The clipboard write MUST happen synchronously inside the click
+   * handler or browsers will block it. The new-tab open then fires
+   * after the clipboard write; if it fails (popup blocker, no web
+   * equivalent) we fall back silently — the clipboard copy still
+   * worked, which is the actually-important part.
+   */
+  async function handleLaunch() {
+    if (!handoffBundle || !handoffState) return;
+    const host = handoffState.host;
+    const { setupCmd, runCmd } = buildCliCommands({
+      handoffUrl: handoffBundle.handoff_url,
+      host,
+      model: selectedModel,
+      effort: selectedEffort,
+    });
+
+    // Copy the full prompt to clipboard (fallback for hosts that can't
+    // receive prompts via URL scheme — currently Claude Code and Gemini).
+    const fullPrompt = buildAgentPrompt({ setupCmd, runCmd });
+    try {
+      await navigator.clipboard.writeText(fullPrompt);
+    } catch (err) {
+      console.error("clipboard write failed", err);
+    }
+
+    // Open the host's app if it has a launchable URL scheme.
+    // Codex gets codex://new?prompt=<text> (pre-fills composer).
+    // Claude Code gets claude:// (opens app, clipboard fallback).
+    // Gemini CLI has no app to open — show manual commands instead.
+    const launchUrl = buildLaunchUrl({ host, runCmd, setupCmd });
+    if (launchUrl) {
+      window.location.href = launchUrl;
+      if (host === "codex") {
+        setLaunchStatus(
+          `Codex opened with the review command pre-filled. Just hit send.`,
+        );
+      } else {
+        setLaunchStatus(
+          `${HOST_LABELS[host]} opened. Prompt copied — paste it (⌘V) into the chat.`,
+        );
+      }
+    } else {
+      // No app to launch (Gemini CLI) — expand manual commands.
+      setShowManualCommands(true);
+      setLaunchStatus(`Command copied to clipboard.`);
+    }
+  }
+
+  function resetHandoff() {
+    setHandoffPhase("idle");
+    setHandoffBundle(null);
+    setHandoffState(null);
+    setHandoffMessage("");
+    setLaunchStatus("");
+    setShowManualCommands(false);
+  }
+
   const accepting = systemStatus?.accepting !== false;
-  const canSubmit = !!file && !!email && !!apiKey && !submitting && accepting;
+  const emailDisabled = systemStatus?.emailCapacityReached === true;
+  const canSubmit =
+    !!file &&
+    !!apiKey &&
+    !submitting &&
+    accepting &&
+    handoffPhase === "idle" &&
+    (emailDisabled || !!email);
+  // CLI handoff does NOT require an OpenRouter key on the web form — the
+  // user's local `coarse-review` command reads its own key from
+  // ~/.coarse/config.toml or .env. It also does NOT require an email —
+  // the review comes back via the /review/<id> URL printed by the CLI
+  // at the end.
+  const handoffBusy = handoffPhase === "extracting";
+  const canHandoff = !!file && !handoffBusy && !submitting && accepting;
 
   return (
     <div style={{ background: "var(--board)", minHeight: "100vh" }}>
@@ -330,7 +639,7 @@ export default function Home() {
             {" "}
             For faster results, try the CLI:{" "}
             <code style={{ background: "var(--tray)", padding: "0.15em 0.4em", fontSize: "0.95em" }}>
-              pip install coarse
+              pip install coarse-ink
             </code>{" "}
             <a
               href="https://github.com/Davidvandijcke/coarse"
@@ -617,25 +926,29 @@ export default function Home() {
               }}
             >
               <div>
-                <FieldLabel>Email</FieldLabel>
+                <FieldLabel>Email <span style={{ color: "var(--dust)", fontWeight: 400 }}>(for web review only)</span></FieldLabel>
                 <input
                   type="email"
-                  required
-                  value={email}
+                  required={!emailDisabled}
+                  disabled={emailDisabled}
+                  value={emailDisabled ? "" : email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@university.edu"
+                  placeholder={emailDisabled ? "— unavailable —" : "you@university.edu"}
                   aria-label="Email address"
                   className="field-line"
+                  style={emailDisabled ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
                 />
                 <p
                   style={{
                     fontFamily: "var(--font-chalk)",
                     fontSize: "1.1rem",
-                    color: "var(--dust)",
+                    color: emailDisabled ? "var(--red-chalk)" : "var(--dust)",
                     marginTop: "0.4rem",
                   }}
                 >
-                  We&apos;ll email you when it&apos;s done.
+                  {emailDisabled
+                    ? "Daily email cap hit — save your review key to retrieve it."
+                    : <>We&apos;ll email you when it&apos;s done.</>}
                 </p>
               </div>
 
@@ -652,6 +965,35 @@ export default function Home() {
                     get one →
                   </a>
                 </FieldLabel>
+                <div style={{ marginBottom: "0.9rem" }}>
+                  <OpenRouterLoginButton
+                    apiKey={apiKey}
+                    onLogin={() => {
+                      beginLogin(window.location.origin + "/").catch((err) => {
+                        setError(
+                          `OpenRouter login could not start: ${err instanceof Error ? err.message : String(err)}`,
+                        );
+                      });
+                    }}
+                    onLogout={() => {
+                      clearStoredKey();
+                      setApiKey("");
+                      setKeyNotice(null);
+                    }}
+                  />
+                </div>
+                {!apiKey && (
+                  <p
+                    style={{
+                      fontFamily: "var(--font-chalk)",
+                      fontSize: "1rem",
+                      color: "var(--dust)",
+                      margin: "0 0 0.4rem",
+                    }}
+                  >
+                    — or paste a key —
+                  </p>
+                )}
                 <input
                   type="password"
                   required
@@ -669,13 +1011,55 @@ export default function Home() {
                     marginTop: "0.4rem",
                   }}
                 >
-                  Used once. Never stored.
+                  OAuth keys stay in this tab only and clear when you close it. Never saved on our servers.
                 </p>
+                {keyNotice && (
+                  <p
+                    style={{
+                      fontFamily: "var(--font-chalk)",
+                      fontSize: "1rem",
+                      color: "var(--blue-chalk)",
+                      marginTop: "0.35rem",
+                    }}
+                  >
+                    {keyNotice}
+                  </p>
+                )}
               </div>
             </div>
 
             {/* Model picker */}
             <ModelPicker value={model} onChange={setModel} />
+
+            {/* Optional author notes — steer the review */}
+            <div>
+              <FieldLabel>
+                Notes for the reviewer{" "}
+                <span style={{ color: "var(--dust)", fontSize: "0.85em" }}>(optional)</span>
+              </FieldLabel>
+              <textarea
+                value={authorNotes}
+                onChange={(e) => setAuthorNotes(e.target.value.slice(0, 2000))}
+                placeholder="e.g. please focus on the identification strategy in §3 — the data section is still a placeholder."
+                rows={3}
+                maxLength={2000}
+                aria-label="Optional notes to steer the reviewer"
+                className="field-line-textarea"
+              />
+              <p
+                style={{
+                  fontFamily: "var(--font-chalk)",
+                  fontSize: "1rem",
+                  color: "var(--dust)",
+                  marginTop: "0.35rem",
+                  display: "flex",
+                  justifyContent: "space-between",
+                }}
+              >
+                <span>Steer what the reviewer focuses on. Does not override the rubric.</span>
+                <span style={{ fontVariantNumeric: "tabular-nums" }}>{authorNotes.length}/2000</span>
+              </p>
+            </div>
 
             {/* Cost estimate */}
             {file && (
@@ -710,34 +1094,392 @@ export default function Home() {
             )}
 
             <div>
-              <button
-                type="submit"
-                disabled={!canSubmit}
-                style={{
-                  background: canSubmit ? "var(--yellow-chalk)" : "var(--tray)",
-                  color: canSubmit ? "var(--board)" : "var(--dust)",
-                  border: "none",
-                  padding: "0.9375rem 2.5rem",
-                  fontFamily: "var(--font-chalk)",
-                  fontSize: "1.1rem",
-                  fontWeight: 600,
-                  cursor: canSubmit ? "pointer" : "not-allowed",
-                  transition: "background 0.2s, color 0.2s",
-                  borderRadius: "2px",
-                }}
-              >
-                {submitting ? "Submitting..." : "Review my paper"}
-              </button>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem", alignItems: "center" }}>
+                <button
+                  type="submit"
+                  disabled={!canSubmit}
+                  style={{
+                    background: canSubmit ? "var(--yellow-chalk)" : "var(--tray)",
+                    color: canSubmit ? "var(--board)" : "var(--dust)",
+                    border: "none",
+                    padding: "0.9375rem 2.5rem",
+                    fontFamily: "var(--font-chalk)",
+                    fontSize: "1.1rem",
+                    fontWeight: 600,
+                    cursor: canSubmit ? "pointer" : "not-allowed",
+                    transition: "background 0.2s, color 0.2s",
+                    borderRadius: "2px",
+                  }}
+                >
+                  {submitting ? "Submitting..." : "Review my paper"}
+                </button>
+
+                <span
+                  style={{
+                    fontFamily: "var(--font-chalk)",
+                    fontSize: "1.05rem",
+                    color: "var(--dust)",
+                  }}
+                >
+                  or
+                </span>
+
+                <div style={{ position: "relative" }}>
+                  <button
+                    type="button"
+                    disabled={!canHandoff}
+                    onClick={() => setMcpPickerOpen((v) => !v)}
+                    style={{
+                      background: "transparent",
+                      color: canHandoff ? "var(--chalk-bright)" : "var(--dust)",
+                      border: `1.5px solid ${canHandoff ? "var(--yellow-chalk)" : "var(--tray)"}`,
+                      padding: "0.875rem 1.75rem",
+                      fontFamily: "var(--font-chalk)",
+                      fontSize: "1.1rem",
+                      fontWeight: 600,
+                      cursor: canHandoff ? "pointer" : "not-allowed",
+                      transition: "border-color 0.2s, color 0.2s",
+                      borderRadius: "2px",
+                    }}
+                    aria-expanded={mcpPickerOpen}
+                    aria-haspopup="listbox"
+                  >
+                    {handoffBusy ? "Preparing..." : "Review with my subscription ▾"}
+                  </button>
+
+                  {handoffBusy && handoffMessage && (
+                    <div
+                      style={{
+                        position: "absolute",
+                        top: "calc(100% + 0.6rem)",
+                        left: 0,
+                        minWidth: "340px",
+                        padding: "0.65rem 0.9rem",
+                        background: "var(--board-surface)",
+                        border: "1px solid var(--tray)",
+                        borderLeft: "3px solid var(--yellow-chalk)",
+                        borderRadius: "2px",
+                        fontFamily: "var(--font-chalk)",
+                        fontSize: "1rem",
+                        color: "var(--chalk)",
+                        lineHeight: 1.4,
+                        zIndex: 9,
+                      }}
+                    >
+                      <span style={{ color: "var(--yellow-chalk)" }}>⏳</span>{" "}
+                      {handoffMessage}
+                    </div>
+                  )}
+
+                  {mcpPickerOpen && canHandoff && (
+                    <div
+                      role="listbox"
+                      style={{
+                        position: "absolute",
+                        top: "calc(100% + 0.4rem)",
+                        left: 0,
+                        minWidth: "320px",
+                        background: "var(--board-surface)",
+                        border: "1px solid var(--tray)",
+                        borderRadius: "2px",
+                        padding: "0.5rem 0",
+                        boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+                        zIndex: 10,
+                      }}
+                    >
+                      {(["claude-code", "codex", "gemini-cli"] as ChatHost[]).map((h) => (
+                        <button
+                          key={h}
+                          type="button"
+                          onClick={() => handleMcpHandoff(h)}
+                          role="option"
+                          aria-selected="false"
+                          style={{
+                            display: "block",
+                            width: "100%",
+                            textAlign: "left",
+                            padding: "0.7rem 1rem",
+                            background: "transparent",
+                            border: "none",
+                            color: "var(--chalk-bright)",
+                            fontFamily: "var(--font-chalk)",
+                            fontSize: "1.05rem",
+                            cursor: "pointer",
+                            transition: "background 0.15s",
+                            borderRadius: 0,
+                          }}
+                          onMouseEnter={(e) => {
+                            (e.currentTarget as HTMLButtonElement).style.background = "var(--tray)";
+                          }}
+                          onMouseLeave={(e) => {
+                            (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                          }}
+                        >
+                          <span style={{ color: "var(--yellow-chalk)", marginRight: "0.6rem" }}>
+                            {HOST_GLYPHS[h]}
+                          </span>
+                          {HOST_LABELS[h]}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
               <p
                 style={{
                   fontFamily: "var(--font-chalk)",
                   fontSize: "1.1rem",
                   color: "var(--dust)",
                   marginTop: "0.9rem",
+                  maxWidth: "620px",
+                  lineHeight: 1.5,
                 }}
               >
-                File deleted after processing. No provider trains on it. Review key works for 90 days. Usually under $2.
+                <strong style={{ color: "var(--chalk)" }}>Review my paper:</strong>
+                {" "}OpenRouter handles everything end-to-end. File deleted after processing. Review key works for 90 days. Usually under $2.
               </p>
+              <p
+                style={{
+                  fontFamily: "var(--font-chalk)",
+                  fontSize: "1.1rem",
+                  color: "var(--dust)",
+                  marginTop: "0.3rem",
+                  maxWidth: "620px",
+                  lineHeight: 1.5,
+                }}
+              >
+                <strong style={{ color: "var(--chalk)" }}>Review with my subscription:</strong>
+                {" "}we hand you a shell command that runs the full coarse pipeline
+                locally using <em>your</em>{" "}
+                <a href="https://claude.ai/download" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue-chalk)", textDecoration: "none" }}>Claude Code</a>,{" "}
+                <a href="https://github.com/openai/codex" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue-chalk)", textDecoration: "none" }}>Codex</a>, or{" "}
+                <a href="https://github.com/google-gemini/gemini-cli" target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue-chalk)", textDecoration: "none" }}>Gemini CLI</a>{" "}
+                subscription for the LLM reasoning. You only pay ~$0.10 for the
+                local Mistral OCR step (with your own OpenRouter key). Review
+                shows up on this page when done.
+              </p>
+              <p
+                style={{
+                  fontFamily: "var(--font-chalk)",
+                  fontSize: "0.88rem",
+                  color: "var(--dust)",
+                  margin: "0.55rem 0 0",
+                  maxWidth: "620px",
+                  lineHeight: 1.5,
+                }}
+              >
+                Runs locally on your machine using your own Claude Code, Codex,
+                or Gemini CLI account. coarse.ink does not receive or store your
+                provider login, and your provider&apos;s terms, usage limits, and
+                organization policies apply. coarse.ink is not affiliated with
+                Anthropic, OpenAI, or Google.
+              </p>
+
+              {handoffBundle && handoffState && (() => {
+                const host = handoffState.host;
+                const { setupCmd, runCmd } = buildCliCommands({
+                  handoffUrl: handoffBundle.handoff_url,
+                  host,
+                  model: selectedModel,
+                  effort: selectedEffort,
+                });
+                return (
+                  <div
+                    style={{
+                      marginTop: "1.5rem",
+                      padding: "1.25rem 1.5rem",
+                      borderLeft: "3px solid var(--yellow-chalk)",
+                      background: "var(--board-surface)",
+                      borderRadius: "2px",
+                    }}
+                  >
+                    <p
+                      style={{
+                        fontFamily: "var(--font-chalk)",
+                        fontSize: "1.15rem",
+                        color: "var(--chalk-bright)",
+                        margin: "0 0 0.75rem",
+                      }}
+                    >
+                      <span style={{ color: "var(--yellow-chalk)" }}>
+                        {HOST_GLYPHS[host]}
+                      </span>{" "}
+                      Review with <strong>{HOST_LABELS[host]}</strong>
+                    </p>
+
+                    {/* Model + effort dropdowns */}
+                    <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", marginBottom: "1rem" }}>
+                      <label style={{ fontFamily: "var(--font-chalk)", fontSize: "0.95rem", color: "var(--dust)" }}>
+                        model{" "}
+                        <select
+                          value={selectedModel}
+                          onChange={(e) => setSelectedModel(e.target.value)}
+                          style={{ marginLeft: "0.25rem", padding: "0.25rem 0.5rem", background: "var(--board)", color: "var(--chalk)", border: "1px solid var(--tray)", borderRadius: "2px", fontFamily: "monospace", fontSize: "0.85rem" }}
+                        >
+                          {HOST_DEFAULT_MODELS[host].map((m) => (<option key={m} value={m}>{m}</option>))}
+                        </select>
+                      </label>
+                      <label style={{ fontFamily: "var(--font-chalk)", fontSize: "0.95rem", color: "var(--dust)" }}>
+                        effort{" "}
+                        <select
+                          value={selectedEffort}
+                          onChange={(e) => setSelectedEffort(e.target.value as EffortLevel)}
+                          style={{ marginLeft: "0.25rem", padding: "0.25rem 0.5rem", background: "var(--board)", color: "var(--chalk)", border: "1px solid var(--tray)", borderRadius: "2px", fontFamily: "monospace", fontSize: "0.85rem" }}
+                        >
+                          {EFFORT_LEVELS.map((e) => (<option key={e} value={e}>{e}</option>))}
+                        </select>
+                      </label>
+                    </div>
+
+                    {/* Primary launch button — hidden for Gemini CLI (no app) */}
+                    {host !== "gemini-cli" && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={handleLaunch}
+                          style={{
+                            display: "block",
+                            width: "100%",
+                            padding: "0.875rem 1.5rem",
+                            background: "var(--yellow-chalk)",
+                            color: "var(--board)",
+                            border: "none",
+                            borderRadius: "2px",
+                            fontFamily: "var(--font-chalk)",
+                            fontSize: "1.1rem",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                            transition: "opacity 0.15s",
+                          }}
+                        >
+                          {HOST_LAUNCH_LABEL[host]}
+                        </button>
+                        <p
+                          style={{
+                            fontFamily: "var(--font-chalk)",
+                            fontSize: "0.9rem",
+                            color: "var(--dust)",
+                            margin: "0.5rem 0 0",
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          {launchStatus || HOST_LAUNCH_HINT[host]}
+                        </p>
+                      </>
+                    )}
+
+                    {/* Review URL */}
+                    <p
+                      style={{
+                        fontFamily: "Georgia, serif",
+                        fontSize: "1rem",
+                        color: "var(--chalk)",
+                        margin: "1rem 0 0",
+                        lineHeight: 1.55,
+                      }}
+                    >
+                      When the review finishes, it will appear at:
+                    </p>
+                    <a
+                      href={`/review/${handoffState.paperId}`}
+                      style={{
+                        display: "inline-block",
+                        marginTop: "0.35rem",
+                        fontFamily: "var(--font-space-mono), monospace",
+                        fontSize: "0.95rem",
+                        color: "var(--blue-chalk)",
+                        textDecoration: "underline",
+                        textUnderlineOffset: "2px",
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      /review/{handoffState.paperId}
+                    </a>
+
+                    {/* Prompt to paste — primary UI for Claude Code +
+                        Gemini CLI; collapsible fallback for Codex */}
+                    {host === "claude-code" || host === "gemini-cli" ? (
+                      <div style={{ marginTop: "1.25rem" }}>
+                        <div
+                          style={{
+                            fontFamily: "var(--font-chalk)",
+                            fontSize: "0.95rem",
+                            color: "var(--yellow-chalk)",
+                            marginBottom: "0.5rem",
+                          }}
+                        >
+                          Paste this prompt into{" "}
+                          {host === "claude-code"
+                            ? "your Claude Code terminal"
+                            : "your Gemini CLI terminal"}
+                          :
+                        </div>
+                        <CodeBlock
+                          text={buildAgentPrompt({ setupCmd, runCmd })}
+                          maxHeight="160px"
+                        />
+                        <p
+                          style={{
+                            fontFamily: "var(--font-chalk)",
+                            fontSize: "0.85rem",
+                            color: "var(--dust)",
+                            margin: "0.5rem 0 0",
+                            lineHeight: 1.5,
+                          }}
+                        >
+                          The agent will refresh the coarse-review skill, ask
+                          for your OpenRouter key if needed, and run the full review
+                          locally. Takes 10–25 minutes. Your provider login stays
+                          local to your machine.
+                        </p>
+                      </div>
+                    ) : (
+                      <div style={{ marginTop: "1.25rem" }}>
+                        <button
+                          type="button"
+                          onClick={() => setShowManualCommands(!showManualCommands)}
+                          style={{
+                            background: "transparent",
+                            border: "none",
+                            color: "var(--dust)",
+                            fontFamily: "var(--font-chalk)",
+                            fontSize: "0.9rem",
+                            cursor: "pointer",
+                            padding: 0,
+                            textDecoration: "underline",
+                            textUnderlineOffset: "2px",
+                          }}
+                        >
+                          {showManualCommands ? "Hide prompt ▴" : "Or paste a prompt manually ▾"}
+                        </button>
+                        {showManualCommands && (
+                          <div style={{ marginTop: "0.75rem" }}>
+                            <div style={{ fontFamily: "var(--font-chalk)", fontSize: "0.9rem", color: "var(--dust)", marginBottom: "0.35rem" }}>
+                              paste this into Codex if the launch button didn&apos;t work:
+                            </div>
+                            <CodeBlock text={buildAgentPrompt({ setupCmd, runCmd })} maxHeight="160px" />
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    <p
+                      style={{
+                        fontFamily: "var(--font-chalk)",
+                        fontSize: "0.85rem",
+                        color: "var(--dust)",
+                        margin: "1rem 0 0",
+                      }}
+                    >
+                      Don&apos;t have {HOST_LABELS[host]} yet?{" "}
+                      <a href={HOST_INSTALL_URL[host]} target="_blank" rel="noopener noreferrer" style={{ color: "var(--blue-chalk)", textDecoration: "none" }}>
+                        install it →
+                      </a>
+                    </p>
+                  </div>
+                );
+              })()}
             </div>
           </form>
         </section>

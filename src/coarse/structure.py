@@ -4,13 +4,19 @@ Parses Docling-produced markdown to extract paper structure: sections are
 identified by heading hierarchy, section text is a direct substring of
 full_markdown. Domain/taxonomy classification is a cheap text-LLM call.
 """
+
 from __future__ import annotations
 
 import logging
 import re
 
 from coarse.llm import LLMClient
-from coarse.prompts import MATH_DETECTION_SYSTEM, METADATA_SYSTEM, math_detection_user
+from coarse.prompts import (
+    MATH_DETECTION_SYSTEM,
+    METADATA_SYSTEM,
+    math_detection_user,
+    metadata_user,
+)
 from coarse.types import (
     MathSectionDetection,
     PaperMetadata,
@@ -86,7 +92,7 @@ def _extract_claims_and_definitions(text: str) -> tuple[list[str], list[str]]:
         label = m.group(2).strip()
 
         # Statement = everything after the header in this paragraph
-        statement = para[m.end():].strip()
+        statement = para[m.end() :].strip()
         # Strip leading punctuation, bold markers, whitespace
         statement = re.sub(r"^[.*:)\s]+", "", statement)
 
@@ -120,6 +126,21 @@ def analyze_structure(paper_text: PaperText, client: LLMClient) -> PaperStructur
 
     title = metadata.title or heuristic_title
 
+    # Heuristic override for the worst mis-classification direction.
+    # If the LLM labelled this as outline/notes/other but the document
+    # actually has substantial prose, the LLM was almost certainly wrong —
+    # overriding to "draft" gives the reviewer a softer frame without
+    # skipping the content. The reverse direction (manuscript labelled
+    # as outline) is the one that silently degrades real peer reviews
+    # into 2-3 soft comments, so we defend against it explicitly.
+    if metadata.document_form in _FORMS_WORTH_RECHECKING and _looks_prose_heavy(sections):
+        logger.info(
+            "Overriding LLM document_form=%s -> draft: document has "
+            "substantial prose (heuristic prose/heading check)",
+            metadata.document_form,
+        )
+        metadata = metadata.model_copy(update={"document_form": "draft"})
+
     # LLM-based math section detection
     sections = _detect_math_sections(sections, client)
 
@@ -129,7 +150,51 @@ def analyze_structure(paper_text: PaperText, client: LLMClient) -> PaperStructur
         taxonomy=metadata.taxonomy,
         abstract=abstract,
         sections=sections,
+        document_form=metadata.document_form,
     )
+
+
+# Document forms where a misclassification would silently downgrade a real
+# peer review (completeness gets skipped, overview/section/editorial all get
+# a "do not critique missing content" notice). If the heuristic in
+# `_looks_prose_heavy` contradicts the LLM's label here, override to "draft"
+# so the content still gets reviewed with a softened frame rather than
+# skipped outright.
+_FORMS_WORTH_RECHECKING = frozenset({"outline", "notes", "other"})
+
+# Average non-bullet prose characters per section above which a document is
+# considered "prose-heavy" (~40-50 words/section). Outlines typically run
+# well below this — bullets and heading lines contribute zero. Tuned from
+# real outlines vs real manuscripts; raise if false positives appear.
+_PROSE_HEAVY_THRESHOLD_CHARS = 300
+
+
+def _looks_prose_heavy(sections: list[SectionInfo]) -> bool:
+    """Return True if the parsed sections contain substantial non-bullet prose.
+
+    Counts the characters on each non-empty line that is NOT a markdown
+    bullet (``- ``, ``* ``, ``•``) or a markdown heading (``#``). Averages
+    across sections. Returns True when that average exceeds
+    ``_PROSE_HEAVY_THRESHOLD_CHARS``.
+
+    Purpose: defend against LLM mis-classification of a completed manuscript
+    as ``outline``/``notes``/``other``. The manuscript→outline direction is
+    much worse than outline→manuscript: the former silently degrades a real
+    peer review (5/8 critiques get softened, completeness skips entirely);
+    the latter just runs strict review on a document that can absorb it.
+    """
+    if not sections:
+        return False
+    total_prose = 0
+    for s in sections:
+        for line in s.text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped[0] in ("-", "*", "•", "#"):
+                continue
+            total_prose += len(stripped)
+    return total_prose / len(sections) > _PROSE_HEAVY_THRESHOLD_CHARS
 
 
 def _parse_sections_from_markdown(markdown: str) -> list[SectionInfo]:
@@ -141,16 +206,17 @@ def _parse_sections_from_markdown(markdown: str) -> list[SectionInfo]:
     matches = list(_HEADING_RE.finditer(markdown))
     if not matches:
         # No headings found — treat entire document as one section
-        return [SectionInfo(
-            number=1,
-            title="Full Document",
-            text=markdown.strip(),
-            section_type=SectionType.OTHER,
-        )]
+        return [
+            SectionInfo(
+                number=1,
+                title="Full Document",
+                text=markdown.strip(),
+                section_type=SectionType.OTHER,
+            )
+        ]
 
     sections: list[SectionInfo] = []
     for i, match in enumerate(matches):
-        level = len(match.group(1))
         title = match.group(2).strip()
 
         # Section text: from end of this heading line to start of next heading (or EOF)
@@ -164,14 +230,16 @@ def _parse_sections_from_markdown(markdown: str) -> list[SectionInfo]:
         section_type = _classify_section_type(title)
         sec_claims, sec_defs = _extract_claims_and_definitions(text)
 
-        sections.append(SectionInfo(
-            number=number,
-            title=title,
-            text=text,
-            section_type=section_type,
-            claims=sec_claims,
-            definitions=sec_defs,
-        ))
+        sections.append(
+            SectionInfo(
+                number=number,
+                title=title,
+                text=text,
+                section_type=section_type,
+                claims=sec_claims,
+                definitions=sec_defs,
+            )
+        )
 
     return sections
 
@@ -211,7 +279,7 @@ def _extract_title(markdown: str) -> str:
 
     # All headings are section names — try text before the first heading
     if matches:
-        preamble = markdown[:matches[0].start()].strip()
+        preamble = markdown[: matches[0].start()].strip()
         if preamble:
             # Take the first non-empty line from the preamble
             for line in preamble.split("\n"):
@@ -236,7 +304,7 @@ def _extract_abstract(sections: list[SectionInfo], markdown: str) -> str:
     # Fallback: first paragraph (text before any heading)
     match = _HEADING_RE.search(markdown)
     if match and match.start() > 0:
-        return markdown[:match.start()].strip()[:2000]
+        return markdown[: match.start()].strip()[:2000]
 
     # Last resort: first 500 chars
     return markdown[:500].strip()
@@ -252,19 +320,32 @@ def _get_metadata(
     headings_str = ", ".join(headings[:20])
     messages = [
         {"role": "system", "content": METADATA_SYSTEM},
-        {"role": "user", "content": (
-            f"Extract the title and classify this paper.\n\n"
-            f"**First page**:\n{first_page}\n\n"
-            f"**Abstract**: {abstract[:1000]}\n"
-            f"**Headings**: {headings_str}\n"
-        )},
+        {"role": "user", "content": metadata_user(first_page, abstract[:1000], headings_str)},
     ]
     try:
-        return client.complete(messages, PaperMetadata, max_tokens=256, temperature=0.1)
+        # 512 leaves headroom for a long title + subtitle plus the other
+        # four fields under instructor's JSON envelope. 384 was tight when
+        # ML/bio titles run 200+ chars before domain/taxonomy/document_form
+        # land; hitting finish_reason=length here drops us into the fallback
+        # and silently loses the classification.
+        return client.complete(messages, PaperMetadata, max_tokens=512, temperature=0.1)
     except Exception:
-        logger.warning("Metadata extraction failed, using defaults")
+        # Fall back to "draft", NOT "manuscript". The whole point of this
+        # feature is that strict peer-review on non-manuscripts produces
+        # "reject - not a manuscript" noise (the April 11 incident). A
+        # metadata-extraction failure is exactly the case where we don't
+        # know what we have, and the punitive default recreates the harm
+        # the feature is supposed to prevent. "draft" still reviews the
+        # written prose but suppresses the "write the manuscript" genre.
+        logger.warning(
+            "Metadata extraction failed, using defaults (document_form=draft)",
+            exc_info=True,
+        )
         return PaperMetadata(
-            title="", domain="unknown", taxonomy="academic/research_paper",
+            title="",
+            domain="unknown",
+            taxonomy="academic/research_paper",
+            document_form="draft",
         )
 
 
@@ -272,10 +353,22 @@ def _get_metadata(
 # Math section detection
 # ---------------------------------------------------------------------------
 
-_PROOF_KEYWORDS = frozenset([
-    "theorem", "proof", "lemma", "proposition", "corollary", "q.e.d", "qed",
-    "∎", "□", "we prove", "we show that", "it follows that",
-])
+_PROOF_KEYWORDS = frozenset(
+    [
+        "theorem",
+        "proof",
+        "lemma",
+        "proposition",
+        "corollary",
+        "q.e.d",
+        "qed",
+        "∎",
+        "□",
+        "we prove",
+        "we show that",
+        "it follows that",
+    ]
+)
 
 
 def _detect_math_sections_keyword(sections: list[SectionInfo]) -> list[SectionInfo]:
@@ -302,12 +395,26 @@ def _detect_math_sections(
         {"role": "user", "content": math_detection_user(sections)},
     ]
     try:
+        # max_tokens=1024 (not 256): Claude 4-family models sometimes write a
+        # prose preamble before emitting the structured output. At 256 the
+        # preamble alone can hit finish_reason='length' and instructor raises
+        # InstructorRetryException("output is incomplete due to a max_tokens
+        # length limit") before any JSON is produced. The actual indices
+        # payload is tiny (<50 tokens), so the higher ceiling only costs more
+        # when the model actually talks, which the prompt now discourages.
         result = client.complete(
-            messages, MathSectionDetection, max_tokens=256, temperature=0.1,
+            messages,
+            MathSectionDetection,
+            max_tokens=1024,
+            temperature=0.1,
         )
         math_indices = set(result.math_section_indices)
-    except Exception:
-        logger.warning("Math section detection failed, falling back to keyword detection")
+    except Exception as exc:
+        logger.warning(
+            "Math section detection failed (%s: %s), falling back to keyword detection",
+            type(exc).__name__,
+            exc,
+        )
         return _detect_math_sections_keyword(sections)
 
     return [

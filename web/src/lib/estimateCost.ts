@@ -1,12 +1,16 @@
 /**
  * Client-side cost estimation for coarse reviews.
  *
- * Mirrors the heuristic from src/coarse/cost.py:
- *   OCR + metadata + 3 overview judges + synthesis + N sections + crossref + critique
+ * Shared stage heuristics are generated from src/coarse/pipeline_spec.py into
+ * web/src/data/pipelineSpec.json. Dynamic assembly still happens here, but the
+ * section caps, stage budgets, and reasoning-model rules come from the same
+ * source as the Python estimator.
  *
  * Token estimate: extract text via pdf.js (loaded from CDN to avoid webpack issues).
  * Pricing: fetched from OpenRouter /api/v1/models.
  */
+
+import pipelineSpec from "../data/pipelineSpec.json" with { type: "json" };
 
 const PDFJS_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.min.mjs";
 const PDFJS_WORKER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.9.155/pdf.worker.min.mjs";
@@ -97,74 +101,176 @@ export async function estimateTokensFromPdf(file: File): Promise<number> {
   return Math.max(500, Math.round(totalChars / 4));
 }
 
-/** Estimate section count from token count (~1,200 tokens per section). */
+const TOKENS_PER_SECTION = pipelineSpec.tokensPerSection;
+const MAX_REVIEWABLE_SECTIONS = pipelineSpec.maxReviewableSections;
+const MIN_SECTIONS = pipelineSpec.minSections;
+const SECTION_PROMPT_OVERHEAD = pipelineSpec.sectionPromptOverhead;
+const OVERVIEW_INPUT_OVERHEAD = pipelineSpec.overviewInputOverhead;
+
+const TOKENS_PER_PAGE = pipelineSpec.tokensPerPage;
+const OCR_COST_PER_PAGE = pipelineSpec.ocrCostPerPage;
+
+const MATH_SECTION_FRACTION = pipelineSpec.mathSectionFraction;
+const CROSS_SECTION_MIN_SECTIONS = pipelineSpec.crossSectionMinSections;
+const MAX_CROSS_SECTION_CALLS = pipelineSpec.maxCrossSectionCalls;
+
+const AVG_COMMENTS_PER_SECTION = pipelineSpec.avgCommentsPerSection;
+const TOKENS_PER_COMMENT = pipelineSpec.tokensPerComment;
+const EDITORIAL_OVERHEAD = pipelineSpec.editorialOverhead;
+const OVERVIEW_CONTEXT_OVERHEAD = pipelineSpec.overviewContextOverhead;
+const REASONING_OVERHEAD_MULTIPLIER = pipelineSpec.reasoningOverheadMultiplier;
+const FIXED_STAGE_INPUT_TOKENS = pipelineSpec.fixedStageInputTokens;
+
+const LITERATURE_FLAT_COST = pipelineSpec.literatureFlatCost;
+const EXTRACTION_QA_FLAT_COST = pipelineSpec.extractionQaFlatCost;
+const COST_BUFFER = pipelineSpec.costBuffer;
+const STAGE_OUTPUT_TOKENS = pipelineSpec.stageOutputTokens;
+
+const REASONING_MODEL_PREFIXES: readonly string[] = pipelineSpec.reasoningModelPrefixes;
+const REASONING_MODEL_SUBSTRINGS: readonly string[] = pipelineSpec.reasoningModelSubstrings;
+
+function isReasoningModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase().replace(/^openrouter\//, "");
+  for (const prefix of REASONING_MODEL_PREFIXES) {
+    if (lower.startsWith(prefix)) return true;
+  }
+  for (const substr of REASONING_MODEL_SUBSTRINGS) {
+    if (lower.includes(substr)) return true;
+  }
+  return false;
+}
+
+/** Estimate section count from token count (capped at MAX_REVIEWABLE_SECTIONS). */
 function estimateSectionCount(tokenEstimate: number): number {
-  return Math.max(4, Math.min(40, Math.floor(tokenEstimate / 1200)));
+  return Math.max(
+    MIN_SECTIONS,
+    Math.min(MAX_REVIEWABLE_SECTIONS, Math.floor(tokenEstimate / TOKENS_PER_SECTION)),
+  );
+}
+
+function estimateCrossSectionCount(sectionCount: number): number {
+  return Math.min(MAX_CROSS_SECTION_CALLS, Math.floor(sectionCount / CROSS_SECTION_MIN_SECTIONS));
 }
 
 /**
  * Estimate total review cost in USD.
- * Mirrors build_cost_estimate() from cost.py.
+ * Mirrors build_cost_estimate() from src/coarse/cost.py. Stage list and
+ * per-stage token budgets must match the Python version exactly.
  */
 export function estimateReviewCost(
   tokenEstimate: number,
   pricing: ModelPricing,
+  modelId: string = "",
+  isPdf: boolean = true,
   sectionCount?: number,
+  hasOpenRouterKey: boolean = true,
 ): number {
   const { promptCostPerToken: inp, completionCostPerToken: out } = pricing;
-  const sections = sectionCount ?? estimateSectionCount(tokenEstimate);
-  const sectionTextTokens = Math.max(1, Math.floor(tokenEstimate / sections));
-  // Each section prompt includes ~5,000 tokens of overhead:
-  // system prompt (~1200) + overview context (~2500) + calibration (~500) + notation (~800)
-  const sectionInput = sectionTextTokens + 5000;
+  const totalTokens = Math.max(0, tokenEstimate);
 
-  // OCR: ~$0.002/page, estimate pages from tokens
-  const estPages = Math.max(1, Math.floor(tokenEstimate / 250));
-  let total = estPages * 0.002;
+  let sections = sectionCount ?? estimateSectionCount(totalTokens);
+  // Guard against section_count=0 so the division below doesn't explode.
+  sections = Math.max(1, sections);
 
-  // Literature search: Perplexity Sonar Pro flat fee (web app always uses OpenRouter)
-  total += 0.03;
+  const mathSectionCount = Math.max(0, Math.round(sections * MATH_SECTION_FRACTION));
+  const crossSectionCount = estimateCrossSectionCount(sections);
 
-  // Estimated raw comments from section agents (each produces 1-5, avg ~3)
-  const nRawComments = sections * 3;
+  const sectionTextTokens = Math.max(1, Math.floor(totalTokens / sections));
+  const sectionInput = sectionTextTokens + SECTION_PROMPT_OVERHEAD;
 
-  // Crossref reads all raw comments, emits deduplicated set as JSON
-  const crossrefIn = nRawComments * 350 + 3500;
-  const crossrefOut = Math.floor(nRawComments * 0.6) * 600;
+  // Editorial reads all downstream comments + full paper markdown. Comments
+  // come from section agents + completeness + proof_verify + cross_section,
+  // not just section agents.
+  const nEditorialComments =
+    sections * AVG_COMMENTS_PER_SECTION +
+    AVG_COMMENTS_PER_SECTION +
+    mathSectionCount * AVG_COMMENTS_PER_SECTION +
+    crossSectionCount * 2;
+  const editorialIn =
+    nEditorialComments * TOKENS_PER_COMMENT + EDITORIAL_OVERHEAD + totalTokens;
 
-  // Critique reads deduped comments, emits revised set as JSON
-  const nDeduped = Math.floor(nRawComments * 0.6);
-  const critiqueIn = nDeduped * 350 + 3500;
-  const critiqueOut = Math.floor(nDeduped * 0.9) * 600;
-
-  // Pipeline stages: [name, tokens_in, tokens_out]
-  const NUM_OVERVIEW_JUDGES = 3;
-  const stages: [string, number, number][] = [
-    ["metadata", 500, 100],
-    ["calibration", 1000, 2000],
-    // 3 overview judges each read full paper
-    ...Array.from(
-      { length: NUM_OVERVIEW_JUDGES },
-      (_, i) => [`overview_judge_${i + 1}`, tokenEstimate, 1500] as [string, number, number],
-    ),
-    ["overview_synthesis", 5000, 1500],
-    ...Array.from(
-      { length: sections },
-      (_, i) => [`section_${i + 1}`, sectionInput, 3500] as [string, number, number],
-    ),
-    ["crossref", crossrefIn, crossrefOut],
-    ["critique", critiqueIn, critiqueOut],
-  ];
-
-  for (const [, tokIn, tokOut] of stages) {
-    total += inp * tokIn + out * tokOut;
+  // Flat-fee stages (non-LLM / non-review-model).
+  const estPages = Math.max(1, Math.floor(totalTokens / TOKENS_PER_PAGE));
+  let total = estPages * OCR_COST_PER_PAGE; // pdf_extraction
+  if (isPdf) {
+    // extraction_qa only runs on PDFs in the real pipeline (pipeline.py:226).
+    total += EXTRACTION_QA_FLAT_COST;
   }
 
-  // Fixed cost for extraction QA (Gemini Flash, always enabled by modal worker)
-  total += 0.02;
+  // Default-model stages mirror pipeline.py:review_paper() 1:1.
+  // Format: [name, tokens_in, tokens_out]
+  const stages: [string, number, number][] = [
+    ["metadata", FIXED_STAGE_INPUT_TOKENS.metadata, STAGE_OUTPUT_TOKENS.metadata],
+    ["math_detection", FIXED_STAGE_INPUT_TOKENS.math_detection, STAGE_OUTPUT_TOKENS.math_detection],
+    ["calibration", FIXED_STAGE_INPUT_TOKENS.calibration, STAGE_OUTPUT_TOKENS.calibration],
+  ];
 
-  // Conservative buffer — better to overestimate
-  total *= 1.15;
+  if (hasOpenRouterKey) {
+    total += LITERATURE_FLAT_COST;
+  } else {
+    stages.push(
+      [
+        "literature_query_gen",
+        FIXED_STAGE_INPUT_TOKENS.literature_query_gen,
+        STAGE_OUTPUT_TOKENS.literature_query_gen,
+      ],
+      [
+        "literature_ranking",
+        FIXED_STAGE_INPUT_TOKENS.literature_ranking,
+        STAGE_OUTPUT_TOKENS.literature_ranking,
+      ],
+    );
+  }
 
+  stages.push(
+    [
+      "contribution_extraction",
+      FIXED_STAGE_INPUT_TOKENS.contribution_extraction,
+      STAGE_OUTPUT_TOKENS.contribution_extraction,
+    ],
+    ["overview", totalTokens + OVERVIEW_INPUT_OVERHEAD, STAGE_OUTPUT_TOKENS.overview],
+    // Completeness reads the full paper via _build_sections_text
+    // (agents/completeness.py:44), not a small 3k prompt.
+    ["completeness", totalTokens + OVERVIEW_CONTEXT_OVERHEAD, STAGE_OUTPUT_TOKENS.completeness],
+    // Section agents (parallel, one per reviewable section).
+    ...Array.from(
+      { length: sections },
+      (_, i) =>
+        [`section_${i + 1}`, sectionInput, STAGE_OUTPUT_TOKENS.section] as [
+          string,
+          number,
+          number,
+        ],
+    ),
+    // Proof verify (chained after section agents for math sections).
+    ...Array.from(
+      { length: mathSectionCount },
+      (_, i) =>
+        [
+          `proof_verify_${i + 1}`,
+          sectionInput + OVERVIEW_CONTEXT_OVERHEAD,
+          STAGE_OUTPUT_TOKENS.proof_verify,
+        ] as [string, number, number],
+    ),
+    // Cross-section synthesis (conditional, up to 3).
+    ...Array.from(
+      { length: crossSectionCount },
+      (_, i) =>
+        [
+          `cross_section_${i + 1}`,
+          sectionTextTokens * 2 + OVERVIEW_CONTEXT_OVERHEAD,
+          STAGE_OUTPUT_TOKENS.cross_section,
+        ] as [string, number, number],
+    ),
+    ["editorial", editorialIn, STAGE_OUTPUT_TOKENS.editorial],
+  );
+
+  const reasoning = isReasoningModel(modelId);
+  for (const [, tokIn, tokOut] of stages) {
+    const outWithOverhead = reasoning ? tokOut * (1 + REASONING_OVERHEAD_MULTIPLIER) : tokOut;
+    total += inp * tokIn + out * outWithOverhead;
+  }
+
+  total *= COST_BUFFER;
   return total;
 }
