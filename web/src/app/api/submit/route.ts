@@ -3,10 +3,10 @@ import { NextRequest, NextResponse } from "next/server";
 import nodemailer from "nodemailer";
 import { checkRateLimit } from "@/lib/rateLimit";
 import { isEmailCapacityReached } from "@/lib/emailCapacity";
+import { countActiveReviews, MAX_CONCURRENT_REVIEWS } from "@/lib/reviewCapacity";
 import { consumeReviewHandoffSecret } from "@/lib/routeHandoffAuth";
 
 export const maxDuration = 30;
-const MAX_CONCURRENT_REVIEWS = 20;
 const MODAL_TRIGGER_TIMEOUT_MS = 10_000;
 const MODAL_WEBHOOK_HOST_SUFFIX = "--coarse-review-run-review.modal.run";
 
@@ -99,12 +99,12 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const { count: activeReviews } = await supabaseAdmin
-    .from("reviews")
-    .select("id", { count: "exact", head: true })
-    .in("status", ["queued", "running"]);
+  const activeReviews = await countActiveReviews(supabaseAdmin);
+  if (activeReviews === null) {
+    return NextResponse.json({ error: "Failed to check current review capacity" }, { status: 503 });
+  }
 
-  if ((activeReviews ?? 0) >= MAX_CONCURRENT_REVIEWS) {
+  if (activeReviews >= MAX_CONCURRENT_REVIEWS) {
     return NextResponse.json(
       {
         error: "We're seeing high traffic right now. Please try again in a few minutes.",
