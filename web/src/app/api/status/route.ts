@@ -1,9 +1,21 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
-import { EMAIL_CAPACITY_REVIEW_THRESHOLD } from "@/lib/emailCapacity";
-import { ACTIVE_REVIEW_WINDOW_MS, MAX_CONCURRENT_REVIEWS } from "@/lib/reviewCapacity";
+import { EMAIL_CAPACITY_REVIEW_THRESHOLD, EMAIL_DELIVERY_DISABLED } from "@/lib/emailCapacity";
+import {
+  getActiveReviewWindowStartIso,
+  MAX_CONCURRENT_REVIEWS,
+} from "@/lib/reviewCapacity";
+
+// TEMP banner shown while EMAIL_DELIVERY_DISABLED is true. Flip the kill
+// switch in `lib/emailCapacity.ts` to re-enable emails; this constant can
+// stay — it is only rendered when the switch is on, and the DB
+// `system_status.banner_message` still overrides it when an operator sets
+// an incident-specific notice.
+const EMAIL_DISABLED_BANNER =
+  "Email delivery is temporarily down — save your review key when you submit and check back at coarse.ink/status/<your-key> in about an hour.";
 
 export const revalidate = 10; // ISR: revalidate every 10 seconds
+
 export async function GET() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseKey = process.env.SUPABASE_SERVICE_KEY;
@@ -15,7 +27,7 @@ export async function GET() {
         banner: "Service temporarily unavailable.",
         activeReviews: 0,
         capacity: MAX_CONCURRENT_REVIEWS,
-        emailCapacityReached: false,
+        emailCapacityReached: EMAIL_DELIVERY_DISABLED,
       },
       { headers: { "Cache-Control": "public, s-maxage=10" } },
     );
@@ -24,23 +36,33 @@ export async function GET() {
   const supabase = createClient(supabaseUrl, supabaseKey);
   const now = Date.now();
   const since24h = new Date(now - 24 * 60 * 60 * 1000).toISOString();
-  const activeSince = new Date(now - ACTIVE_REVIEW_WINDOW_MS).toISOString();
+  const activeSince = getActiveReviewWindowStartIso(now);
 
   const [statusResult, activeResult, dailyResult] = await Promise.all([
     supabase.from("system_status").select("accepting_reviews, banner_message").eq("id", 1).single(),
-    supabase
-      .from("reviews")
-      .select("id, review_emails!inner(review_id)", { count: "exact", head: true })
-      .in("status", ["queued", "running"])
-      .gte("created_at", activeSince),
+    supabase.rpc("count_active_submitted_reviews", { since: activeSince }),
     supabase.from("reviews").select("id", { count: "exact", head: true }).gte("created_at", since24h),
   ]);
 
-  const accepting = statusResult.data?.accepting_reviews ?? true;
-  const banner = statusResult.data?.banner_message ?? null;
-  const activeReviews = activeResult.count ?? 0;
+  const activeCountError = activeResult.error;
+  const accepting = activeCountError
+    ? false
+    : (statusResult.data?.accepting_reviews ?? true);
+  const dbBanner = statusResult.data?.banner_message ?? null;
+  const activeReviews = activeCountError
+    ? MAX_CONCURRENT_REVIEWS
+    : Number(activeResult.data ?? 0);
   const dailyReviews = dailyResult.count ?? 0;
-  const emailCapacityReached = dailyReviews >= EMAIL_CAPACITY_REVIEW_THRESHOLD;
+  const emailCapacityReached =
+    EMAIL_DELIVERY_DISABLED || dailyReviews >= EMAIL_CAPACITY_REVIEW_THRESHOLD;
+
+  // DB-controlled banner still wins when an operator has set an
+  // incident-specific message; otherwise fall back to the hardcoded email-
+  // outage notice while the kill switch is on.
+  const banner =
+    dbBanner
+    ?? (activeCountError ? "Service temporarily unavailable." : null)
+    ?? (EMAIL_DELIVERY_DISABLED ? EMAIL_DISABLED_BANNER : null);
 
   return NextResponse.json(
     { accepting, banner, activeReviews, capacity: MAX_CONCURRENT_REVIEWS, emailCapacityReached },

@@ -1,83 +1,72 @@
 "use client";
 
-import { useEffect, useState, useMemo } from "react";
-import { createClient } from "@/lib/supabase";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import type { Review } from "@/lib/types";
 import { PageMarks } from "@/components/charcoal";
 import { parseReview } from "@/lib/parseReview";
 import ReviewDisplay from "@/components/ReviewDisplay";
 
-const UUID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
 export default function ReviewPageClient({ id }: { id: string }) {
   const [review, setReview] = useState<Review | null>(null);
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
-  const supabase = useMemo(() => createClient(id), [id]);
+  const [accessError, setAccessError] = useState<string | null>(null);
+  const searchParams = useSearchParams();
+  const token = searchParams.get("token")?.trim() ?? "";
 
   useEffect(() => {
-    // Reset UI state on id changes so stale data is never shown for a new review URL.
-    setReview(null);
-    setNotFound(false);
-    setLoading(true);
-
-    if (!UUID_REGEX.test(id)) {
-      setNotFound(true);
-      setLoading(false);
-      return;
-    }
-
-    let pollTimeout: ReturnType<typeof setTimeout>;
-    let isActive = true;
+    let cancelled = false;
+    let interval: ReturnType<typeof setInterval> | undefined;
 
     async function load() {
-      const { data, error } = await supabase
-        .from("reviews")
-        .select("*")
-        .eq("id", id)
-        .single();
+      const res = await fetch(`/api/review/${id}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        cache: "no-store",
+      });
 
-      if (!isActive) return;
+      if (cancelled) return;
 
-      if (error) {
-        // "No rows" should render not-found and stop polling.
-        if (error.code === "PGRST116") {
-          setNotFound(true);
-          setLoading(false);
-          return;
-        }
-        // Transient/network/RLS errors should retry.
+      if (res.status === 401) {
+        setAccessError("This review needs the full secure review link or review key.");
         setLoading(false);
-        pollTimeout = setTimeout(load, 3000);
         return;
       }
-
-      if (!data) {
-        // Defensive fallback: keep polling instead of flipping to not-found.
+      if (res.status === 404) {
+        setNotFound(true);
         setLoading(false);
-        pollTimeout = setTimeout(load, 3000);
         return;
       }
-
-      setNotFound(false);
-      setReview(data as Review);
-      if (data.status === "done" || data.status === "failed") {
+      if (!res.ok) {
+        let message = "Failed to load the review. Please try again.";
+        try {
+          const body = (await res.json()) as { error?: string };
+          if (body.error) message = body.error;
+        } catch {}
+        setAccessError(message);
         setLoading(false);
         return;
       }
 
+      const data = (await res.json()) as Review;
+      setReview(data);
       setLoading(false);
-      pollTimeout = setTimeout(load, 3000);
+      setNotFound(false);
+      setAccessError(null);
+
+      if (data.status !== "queued" && data.status !== "running" && interval) {
+        clearInterval(interval);
+      }
     }
 
     load();
+    interval = setInterval(load, 3000);
 
     return () => {
-      isActive = false;
-      clearTimeout(pollTimeout);
+      cancelled = true;
+      if (interval) clearInterval(interval);
     };
-  }, [id, supabase]);
+  }, [id, token]);
 
   const parsed = useMemo(
     () => (review?.result_markdown ? parseReview(review.result_markdown) : null),
@@ -165,30 +154,61 @@ export default function ReviewPageClient({ id }: { id: string }) {
     );
   }
 
-  if (!review) {
+  if (accessError) {
     return (
       <div
         style={{
           background: "var(--board)",
           minHeight: "100vh",
           display: "flex",
+          flexDirection: "column",
           alignItems: "center",
           justifyContent: "center",
+          padding: "2rem",
+          textAlign: "center",
         }}
       >
-        <span
+        <p
+          style={{
+            fontFamily: "var(--font-serif)",
+            fontSize: "1.625rem",
+            fontStyle: "italic",
+            fontWeight: 700,
+            color: "var(--chalk-bright)",
+            margin: "0 0 0.75rem",
+          }}
+        >
+          Access token required.
+        </p>
+        <p
           style={{
             fontFamily: "Georgia, serif",
             fontStyle: "italic",
             color: "var(--dust)",
             fontSize: "1.1rem",
+            margin: "0 0 1.25rem",
           }}
         >
-          Reconnecting<span className="blink">_</span>
-        </span>
+          {accessError}
+        </p>
+        <a
+          href="/"
+          style={{
+            fontFamily: "var(--font-space-mono), monospace",
+            fontSize: "0.85rem",
+            letterSpacing: "0.12em",
+            textTransform: "uppercase",
+            color: "var(--yellow-chalk)",
+            textDecoration: "none",
+          }}
+        >
+          Back home →
+        </a>
       </div>
     );
   }
+
+  if (!review) return null;
 
   const isDone = review.status === "done";
   const isPending = review.status === "queued" || review.status === "running";
@@ -286,12 +306,67 @@ export default function ReviewPageClient({ id }: { id: string }) {
         </div>
       )}
 
+      {review.status === "cancelled" && (
+        <div
+          style={{
+            maxWidth: "600px",
+            margin: "0 auto",
+            padding: "6rem 2rem",
+          }}
+        >
+          <div
+            style={{
+              borderLeft: "3px solid var(--yellow-chalk)",
+              paddingLeft: "1.25rem",
+            }}
+          >
+            <p
+              style={{
+                fontFamily: "var(--font-serif)",
+                fontSize: "1.375rem",
+                fontStyle: "italic",
+                fontWeight: 700,
+                color: "var(--yellow-chalk)",
+                margin: "0 0 0.5rem",
+              }}
+            >
+              Review cancelled.
+            </p>
+            <p
+              style={{
+                fontFamily: "Georgia, serif",
+                color: "var(--dust)",
+                fontStyle: "italic",
+                fontSize: "1.1rem",
+                margin: "0 0 1rem",
+              }}
+            >
+              {review.error_message ?? "This review was cancelled before completion."}
+            </p>
+            <a
+              href="/"
+              style={{
+                fontFamily: "var(--font-space-mono), monospace",
+                fontSize: "0.85rem",
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: "var(--yellow-chalk)",
+                textDecoration: "none",
+              }}
+            >
+              Submit a new paper →
+            </a>
+          </div>
+        </div>
+      )}
+
       {/* ── Done: structured display ────────────────────── */}
       {isDone && review.result_markdown && parsed && (
         <ReviewDisplay
           parsed={parsed}
           markdown={review.result_markdown}
           reviewId={review.id}
+          accessToken={token}
           paperMarkdown={review.paper_markdown}
           paperTitle={review.paper_title}
           model={review.model}
