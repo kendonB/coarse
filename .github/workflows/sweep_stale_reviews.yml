@@ -78,9 +78,7 @@ jobs:
 
           # Filter: queued OR running, created more than 3h ago. PostgREST
           # `in.(...)` encodes the tuple; `created_at=lt.<cutoff>` is the age
-          # bound. We use `return=representation` on the PATCH so we can log
-          # the ids we touched — useful for debugging when a user reports a
-          # "stuck" review that turns out to have been swept.
+          # bound.
           try:
               stale = api(
                   "GET",
@@ -96,9 +94,14 @@ jobs:
                   print("reviews: nothing to sweep")
                   sys.exit(0)
 
-              # Log each one so we have an audit trail in the workflow output.
-              for row in stale:
-                  print(f"  {row['status']:8} {row['id']} created={row['created_at']}")
+              # Keep logs aggregate-only: review IDs are bearer tokens for
+              # /review/<id> pages, so never emit raw IDs in workflow output.
+              queued = sum(1 for row in stale if row.get("status") == "queued")
+              running = sum(1 for row in stale if row.get("status") == "running")
+              print(
+                  "reviews: stale breakdown "
+                  f"(queued={queued}, running={running})"
+              )
 
               api(
                   "PATCH",
