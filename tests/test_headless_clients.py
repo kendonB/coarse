@@ -28,16 +28,12 @@ def _reset_probe_caches():
     """
     ClaudeCodeClient._effort_flag_probed = False
     ClaudeCodeClient._effort_flag_supported = False
-    CodexClient._config_override_probed = False
-    CodexClient._config_override_supported = False
     GeminiClient._flag_probed = False
     GeminiClient._approval_mode_flag_supported = False
     GeminiClient._output_format_flag_supported = False
     yield
     ClaudeCodeClient._effort_flag_probed = False
     ClaudeCodeClient._effort_flag_supported = False
-    CodexClient._config_override_probed = False
-    CodexClient._config_override_supported = False
     GeminiClient._flag_probed = False
     GeminiClient._approval_mode_flag_supported = False
     GeminiClient._output_format_flag_supported = False
@@ -47,11 +43,6 @@ def _mark_claude_effort_supported(supported: bool) -> None:
     """Skip the real probe by pre-setting the class cache."""
     ClaudeCodeClient._effort_flag_probed = True
     ClaudeCodeClient._effort_flag_supported = supported
-
-
-def _mark_codex_config_override_supported(supported: bool) -> None:
-    CodexClient._config_override_probed = True
-    CodexClient._config_override_supported = supported
 
 
 def _mark_gemini_flags_supported(approval_mode: bool, output_format: bool) -> None:
@@ -114,7 +105,6 @@ def test_complete_keeps_valid_json_escapes(monkeypatch) -> None:
 
 
 def test_codex_low_effort_avoids_minimal_mode() -> None:
-    _mark_codex_config_override_supported(True)
     client = CodexClient(codex_bin="codex", codex_model="gpt-5.4-mini", effort="low")
 
     cmd = client._build_cmd()
@@ -125,7 +115,6 @@ def test_codex_low_effort_avoids_minimal_mode() -> None:
 
 
 def test_codex_high_effort_maps_directly_to_high() -> None:
-    _mark_codex_config_override_supported(True)
     client = CodexClient(codex_bin="codex", codex_model="gpt-5.4-mini", effort="high")
 
     cmd = client._build_cmd()
@@ -134,7 +123,6 @@ def test_codex_high_effort_maps_directly_to_high() -> None:
 
 
 def test_codex_medium_effort_maps_directly_to_medium() -> None:
-    _mark_codex_config_override_supported(True)
     client = CodexClient(codex_bin="codex", codex_model="gpt-5.4-mini", effort="medium")
 
     cmd = client._build_cmd()
@@ -143,7 +131,6 @@ def test_codex_medium_effort_maps_directly_to_medium() -> None:
 
 
 def test_codex_xhigh_effort_maps_directly_to_xhigh() -> None:
-    _mark_codex_config_override_supported(True)
     client = CodexClient(codex_bin="codex", codex_model="gpt-5.5", effort="xhigh")
 
     cmd = client._build_cmd()
@@ -152,7 +139,6 @@ def test_codex_xhigh_effort_maps_directly_to_xhigh() -> None:
 
 
 def test_codex_legacy_max_effort_maps_to_xhigh() -> None:
-    _mark_codex_config_override_supported(True)
     client = CodexClient(codex_bin="codex", codex_model="gpt-5.5", effort="max")
 
     cmd = client._build_cmd()
@@ -160,20 +146,15 @@ def test_codex_legacy_max_effort_maps_to_xhigh() -> None:
     assert "model_reasoning_effort='xhigh'" in cmd
 
 
-def test_codex_old_version_drops_config_override_and_injects_text() -> None:
-    """Old Codex versions without ``-c KEY=VALUE`` get text-level effort."""
-    _mark_codex_config_override_supported(False)
+def test_codex_prepare_prompt_never_injects_effort_text() -> None:
     client = CodexClient(codex_bin="codex", codex_model="gpt-5.4-mini", effort="high")
 
     cmd = client._build_cmd()
     prompt = client._prepare_prompt("[USER]\nReview.")
 
-    # No -c flag in cmd.
-    assert "-c" not in cmd
-    assert not any("model_reasoning_effort" in part for part in cmd)
-    # Text injection instead.
-    assert "Reasoning effort: high." in prompt
-    assert prompt.endswith("[USER]\nReview.")
+    assert "-c" in cmd
+    assert "model_reasoning_effort='high'" in cmd
+    assert prompt == "[USER]\nReview."
 
 
 def test_claude_effort_passes_through_unchanged() -> None:
@@ -475,7 +456,6 @@ def test_run_missing_binary_error_includes_install_hint() -> None:
 def test_run_missing_binary_error_is_per_host() -> None:
     """Each client returns the right install hint — codex points at
     @openai/codex, gemini at @google/gemini-cli."""
-    _mark_codex_config_override_supported(True)
     _mark_gemini_flags_supported(approval_mode=True, output_format=True)
 
     codex = CodexClient(codex_bin="codex")
@@ -805,7 +785,6 @@ def test_run_only_falls_back_to_default_model_once(monkeypatch) -> None:
 def test_codex_model_fallback_noop_when_no_user_model(monkeypatch) -> None:
     """If codex_model=None we're already using codex's built-in
     default — nothing to fall back to, so don't try."""
-    _mark_codex_config_override_supported(True)
     client = CodexClient(codex_bin="codex")  # codex_model defaults to None
     assert client._can_fall_back_to_default_model() is False
 

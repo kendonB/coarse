@@ -837,18 +837,12 @@ class CodexClient(_HeadlessCLIClient):
     model_reasoning_effort=<level>`` per call so the choice is
     ephemeral and doesn't mutate the user's ``~/.codex/config.toml``.
 
-    The ``-c KEY=VALUE`` flag itself is version-gated — older Codex
-    builds (pre-``exec`` subcommand overhaul) didn't ship it. We
-    probe ``codex exec --help`` once per class and fall back to
-    text-level effort injection if ``-c`` isn't mentioned. Symmetric
-    with the ``ClaudeCodeClient`` pattern.
+    Current Codex exposes this as ``-c, --config <key=value>``. coarse
+    always uses that native path and lets Codex fail loudly if the
+    override is rejected.
     """
 
     display_name = "codex exec"
-
-    #: Probe cache — see ``ClaudeCodeClient._effort_flag_probed``.
-    _config_override_probed: bool = False
-    _config_override_supported: bool = False
 
     # coarse-level effort name → codex model_reasoning_effort value.
     # Avoid "minimal" because current Codex builds reject web_search under
@@ -900,55 +894,18 @@ class CodexClient(_HeadlessCLIClient):
         self._codex_model = default
         self._model_fallback_attempted = True
 
-    def _ensure_config_override_probed(self) -> None:
-        """Probe whether ``codex exec --help`` mentions ``-c`` config
-        override support, caching the result on the class."""
-        cls = type(self)
-        if cls._config_override_probed:
-            return
-        help_text = _probe_cli_help(self._codex_bin, "exec")
-        # Look for any of the canonical forms Codex uses to document the
-        # config override flag across versions. The probe is generous
-        # because different Codex releases format --help differently;
-        # we'd rather match too loosely and occasionally send -c to a
-        # version that ignores unknown keys than miss a version that
-        # does support it.
-        cls._config_override_supported = any(
-            marker in help_text
-            for marker in (
-                "-c <KEY=VALUE>",
-                "-c KEY=VALUE",
-                "-c key=value",
-                "--config <KEY=VALUE>",
-                "--config KEY=VALUE",
-            )
-        )
-        cls._config_override_probed = True
-        if not cls._config_override_supported:
-            logger.warning(
-                "Codex on this machine does not expose `-c KEY=VALUE` "
-                "config override (old version). Falling back to text-"
-                "level effort injection. Upgrade Codex for native "
-                "reasoning-effort control: npm install -g @openai/codex@latest"
-            )
-
     def _build_cmd(self) -> list[str]:
-        self._ensure_config_override_probed()
         cmd = [self._codex_bin, "exec"]
         if self._codex_model:
             cmd += ["-m", self._codex_model]
-        if type(self)._config_override_supported:
-            mapped = self._EFFORT_MAP.get(self._effort, self._effort)
-            cmd += ["-c", f"model_reasoning_effort={mapped!r}"]
+        mapped = self._EFFORT_MAP.get(self._effort, self._effort)
+        cmd += ["-c", f"model_reasoning_effort={mapped!r}"]
         # Read prompt from stdin by passing '-' as the positional arg.
         cmd.append("-")
         return cmd
 
     def _prepare_prompt(self, prompt: str) -> str:
-        self._ensure_config_override_probed()
-        if type(self)._config_override_supported:
-            return prompt
-        return _effort_text_prefix(self._effort) + prompt
+        return prompt
 
 
 class GeminiClient(_HeadlessCLIClient):
