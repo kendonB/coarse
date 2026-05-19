@@ -228,9 +228,9 @@ def test_main_handoff_supports_markdown_source(tmp_path) -> None:
                 "--host",
                 "codex",
                 "--model",
-                "gpt-5.4",
+                "gpt-5.5",
                 "--effort",
-                "high",
+                "xhigh",
                 "--output-dir",
                 str(out_dir),
             ]
@@ -240,8 +240,8 @@ def test_main_handoff_supports_markdown_source(tmp_path) -> None:
     assert captured["paper_path"] == source
     assert captured["kwargs"] == {
         "host": "codex",
-        "model": "gpt-5.4",
-        "effort": "high",
+        "model": "gpt-5.5",
+        "effort": "xhigh",
         "pre_extracted": None,
     }
     assert (out_dir / "paper_review.md").read_text(encoding="utf-8") == "# Review\n"

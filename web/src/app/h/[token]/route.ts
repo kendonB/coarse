@@ -333,7 +333,7 @@ function renderLandingPage(args: {
     <h2>2. Launch the review (detached)</h2>
     <pre class="cmd" id="run"><button class="copy" onclick="copy('run')">copy</button>${safe(runCmd)}</pre>
     <p class="note">Starts a detached local review worker, writes its PID to <code>${safe(logFile)}.pid</code>, streams all output to <code>${safe(logFile)}</code>, and returns within 2 seconds. The review will appear at <code>${safe(siteHost)}/review/${safe(paperId)}?token=…</code> when it's done — the <code>view:</code> line in the log has the full tokened URL.</p>
-    <p class="note"><strong>Options:</strong> edit the command before running to add <code>--host claude|codex|gemini</code> (default: first CLI found on PATH), <code>--model &lt;id&gt;</code>, and <code>--effort low|medium|high|max</code>.</p>
+    <p class="note"><strong>Options:</strong> edit the command before running to add <code>--host codex|claude|gemini</code> (default: Codex when available), <code>--model &lt;id&gt;</code>, and <code>--effort low|medium|high|xhigh</code>.</p>
   </div>
 
   <div class="step">

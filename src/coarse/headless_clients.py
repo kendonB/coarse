@@ -49,6 +49,7 @@ _EFFORT_TEXT_GUIDANCE = {
     "low": "Keep internal reasoning brief and answer directly.",
     "medium": "Use a moderate amount of internal reasoning before answering.",
     "high": "Use thorough internal reasoning before answering.",
+    "xhigh": "Use your deepest available internal reasoning before answering.",
     "max": "Use your deepest available internal reasoning before answering.",
 }
 
@@ -806,10 +807,8 @@ class ClaudeCodeClient(_HeadlessCLIClient):
             )
 
     def _build_cmd(self) -> list[str]:
-        # Claude Code already exposes the same low/medium/high/max scale we
-        # want at the coarse layer, so pass it through unchanged when the
-        # installed version supports --effort; otherwise drop the flag and
-        # let _prepare_prompt inject the guidance as text.
+        # Claude Code exposes low/medium/high/max. coarse's xhigh is the
+        # Codex-native spelling, so translate it to Claude's max.
         self._ensure_effort_probed()
         cmd = [
             self._claude_bin,
@@ -820,7 +819,7 @@ class ClaudeCodeClient(_HeadlessCLIClient):
             "text",
         ]
         if type(self)._effort_flag_supported:
-            cmd += ["--effort", self._effort]
+            cmd += ["--effort", "max" if self._effort == "xhigh" else self._effort]
         return cmd
 
     def _prepare_prompt(self, prompt: str) -> str:
@@ -834,7 +833,7 @@ class CodexClient(_HeadlessCLIClient):
     """LLMClient replacement backed by the ``codex exec`` CLI (ChatGPT).
 
     ``effort`` maps to Codex's ``model_reasoning_effort`` config
-    override (minimal / low / medium / high). We pass it via ``-c
+    override (low / medium / high / xhigh). We pass it via ``-c
     model_reasoning_effort=<level>`` per call so the choice is
     ephemeral and doesn't mutate the user's ``~/.codex/config.toml``.
 
@@ -858,7 +857,8 @@ class CodexClient(_HeadlessCLIClient):
         "low": "low",
         "medium": "medium",
         "high": "high",
-        "max": "high",
+        "xhigh": "xhigh",
+        "max": "xhigh",
     }
 
     def __init__(

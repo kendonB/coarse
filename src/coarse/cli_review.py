@@ -50,15 +50,15 @@ FINALIZE_TOKEN_TTL_MINUTES = 180
 
 
 def _detect_host() -> str:
-    """Return the first headless CLI found on PATH (claude → codex → gemini)."""
+    """Return the first headless CLI found on PATH (codex → claude → gemini)."""
     import shutil
 
-    for name, bin_ in (("claude", "claude"), ("codex", "codex"), ("gemini", "gemini")):
+    for name, bin_ in (("codex", "codex"), ("claude", "claude"), ("gemini", "gemini")):
         if shutil.which(bin_):
             return name
     raise RuntimeError(
-        "No headless CLI found on PATH. Install one of: claude (Claude Code), "
-        "codex (OpenAI Codex CLI), or gemini (Google Gemini CLI)."
+        "No headless CLI found on PATH. Install one of: codex (OpenAI Codex CLI), "
+        "claude (Claude Code), or gemini (Google Gemini CLI)."
     )
 
 
@@ -488,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
         "--host",
         choices=["claude", "codex", "gemini"],
         default=None,
-        help="Which headless CLI to use. Defaults to whichever is installed first.",
+        help="Which headless CLI to use. Defaults to codex when available.",
     )
     parser.add_argument(
         "--model",
@@ -498,9 +498,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--effort",
-        choices=["low", "medium", "high", "max"],
-        default="high",
-        help="Reasoning effort level (default: high)",
+        choices=["low", "medium", "high", "xhigh", "max"],
+        default="xhigh",
+        help="Reasoning effort level (default: xhigh)",
     )
     parser.add_argument(
         "--output-dir",

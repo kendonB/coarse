@@ -1222,7 +1222,7 @@ function SubscriptionTab() {
                     color: "var(--chalk-bright)",
                   }}
                 >
-                  --effort max
+                  --effort xhigh
                 </code>{" "}
                 on long papers. Re-run; drop effort one notch if it
                 happens twice.

@@ -142,13 +142,22 @@ def test_codex_medium_effort_maps_directly_to_medium() -> None:
     assert "model_reasoning_effort='medium'" in cmd
 
 
-def test_codex_max_effort_caps_at_high() -> None:
+def test_codex_xhigh_effort_maps_directly_to_xhigh() -> None:
     _mark_codex_config_override_supported(True)
-    client = CodexClient(codex_bin="codex", codex_model="gpt-5.4-mini", effort="max")
+    client = CodexClient(codex_bin="codex", codex_model="gpt-5.5", effort="xhigh")
 
     cmd = client._build_cmd()
 
-    assert "model_reasoning_effort='high'" in cmd
+    assert "model_reasoning_effort='xhigh'" in cmd
+
+
+def test_codex_legacy_max_effort_maps_to_xhigh() -> None:
+    _mark_codex_config_override_supported(True)
+    client = CodexClient(codex_bin="codex", codex_model="gpt-5.5", effort="max")
+
+    cmd = client._build_cmd()
+
+    assert "model_reasoning_effort='xhigh'" in cmd
 
 
 def test_codex_old_version_drops_config_override_and_injects_text() -> None:
@@ -183,6 +192,15 @@ def test_claude_effort_passes_through_unchanged() -> None:
         "--effort",
         "max",
     ]
+
+
+def test_claude_xhigh_effort_maps_to_native_max() -> None:
+    _mark_claude_effort_supported(True)
+    client = ClaudeCodeClient(claude_bin="claude", claude_model="claude-opus-4-6", effort="xhigh")
+
+    cmd = client._build_cmd()
+
+    assert cmd[-2:] == ["--effort", "max"]
 
 
 def test_claude_old_version_drops_effort_flag_and_injects_text() -> None:

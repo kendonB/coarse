@@ -431,5 +431,5 @@ def install_skills(
     console.print(
         "\n[dim]Usage:[/dim]\n"
         "  coarse-review <paper.pdf> [--host claude|codex|gemini] "
-        "[--model <id>] [--effort low|medium|high|max]\n"
+        "[--model <id>] [--effort low|medium|high|xhigh]\n"
     )

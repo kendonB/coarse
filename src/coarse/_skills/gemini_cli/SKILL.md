@@ -65,14 +65,14 @@ LOG=/tmp/coarse-review-$(date +%s).log
 # STEP 2a — launch (returns in ~2s with Review PID + Log file)
 uvx --python 3.12 --from 'coarse-ink==1.4.1' \
   coarse-review --detach --log-file "$LOG" \
-  <paper_path_or_handoff_url> --host gemini [--model gemini-3.1-pro-preview] [--effort high]
+  <paper_path_or_handoff_url> --host gemini [--model gemini-3.1-pro-preview] [--effort xhigh]
 
 # STEP 2b — wait (one blocking call, ~10-25 min, emits heartbeats)
 uvx --python 3.12 --from 'coarse-ink==1.4.1' \
   coarse-review --attach "$LOG"
 ```
 
-Run the attach call with a long tool timeout (≥45 minutes) so Gemini CLI doesn't kill the blocking command prematurely. 45 minutes leaves ~20 minutes of margin on top of the 10-25 minute review runtime for cold starts, slow models, long papers, and `--effort max` runs — 30 minutes is too tight because the tool timeout is a wall clock, not an idle-stream cap. Bump to 60 minutes for book-length papers or the largest models. Do NOT re-run the `--detach` command if attach returns early (that would spawn a second worker). Safe to Ctrl+C the attach: the watcher detaches but the worker keeps running. Attach exit codes: `0` complete, `1` failure marker, `2` silent crash, `3` missing pidfile, `124` attach's own 30-min timeout, `130` user interrupt.
+Run the attach call with a long tool timeout (≥45 minutes) so Gemini CLI doesn't kill the blocking command prematurely. 45 minutes leaves ~20 minutes of margin on top of the 10-25 minute review runtime for cold starts, slow models, long papers, and `--effort xhigh` runs — 30 minutes is too tight because the tool timeout is a wall clock, not an idle-stream cap. Bump to 60 minutes for book-length papers or the largest models. Do NOT re-run the `--detach` command if attach returns early (that would spawn a second worker). Safe to Ctrl+C the attach: the watcher detaches but the worker keeps running. Attach exit codes: `0` complete, `1` failure marker, `2` silent crash, `3` missing pidfile, `124` attach's own 30-min timeout, `130` user interrupt.
 
 When attach exits cleanly, use the final log lines as the authoritative artifact locations:
 
@@ -84,7 +84,7 @@ If `local:` is present, read that exact file. If `view:` is present, use that UR
 If `view:` says `unavailable`, report the callback failure and use only the `local:` path.
 
 Available models: `gemini-3.1-pro-preview` (default), `gemini-3-flash-preview`, `gemini-3.1-flash-lite-preview`.
-Available effort levels: `low`, `medium`, `high` (default), `max`.
+Available effort levels: `low`, `medium`, `high`, `xhigh` (default).
 
 **Handoff mode** (when the user came from the coarse web form): the paper is a REMOTE resource at the handoff URL. Do NOT search for a local PDF. Same two-step launch+attach pattern — coarse-review fetches the paper over the network:
 

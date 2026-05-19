@@ -344,7 +344,7 @@ export default function Home() {
   const [handoffMessage, setHandoffMessage] = useState<string>("");
   const [handoffBundle, setHandoffBundle] = useState<CliHandoffBundle | null>(null);
   const [selectedModel, setSelectedModel] = useState<string>("");
-  const [selectedEffort, setSelectedEffort] = useState<EffortLevel>("high");
+  const [selectedEffort, setSelectedEffort] = useState<EffortLevel>("xhigh");
   const [launchStatus, setLaunchStatus] = useState<string>("");
 
   // Refresh system capacity state on mount and when the tab becomes active.
@@ -802,7 +802,7 @@ export default function Home() {
 
       // Step 3: defaults for the modal dropdowns.
       setSelectedModel(HOST_DEFAULT_MODELS[host][0]);
-      setSelectedEffort("high");
+      setSelectedEffort("xhigh");
 
       setHandoffBundle(bundle);
       setHandoffState({ paperId: id, host });
@@ -1551,7 +1551,7 @@ export default function Home() {
                         zIndex: 10,
                       }}
                     >
-                      {(["claude-code", "codex", "gemini-cli"] as ChatHost[]).map((h) => (
+                      {(["codex", "claude-code", "gemini-cli"] as ChatHost[]).map((h) => (
                         <button
                           key={h}
                           type="button"

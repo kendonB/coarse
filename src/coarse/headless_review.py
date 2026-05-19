@@ -231,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--host",
         choices=["claude", "codex", "gemini"],
-        default=os.environ.get("COARSE_HEADLESS_HOST", "claude"),
+        default=os.environ.get("COARSE_HEADLESS_HOST", "codex"),
         help="Which CLI to route LLM calls through",
     )
     _canonical_help = " / ".join(
@@ -246,9 +246,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--effort",
-        default=os.environ.get("COARSE_HEADLESS_EFFORT", "high"),
-        choices=["low", "medium", "high", "max"],
-        help="Reasoning effort (low/medium/high/max)",
+        default=os.environ.get("COARSE_HEADLESS_EFFORT", "xhigh"),
+        choices=["low", "medium", "high", "xhigh", "max"],
+        help="Reasoning effort (low/medium/high/xhigh)",
     )
     parser.add_argument("paper_path", type=Path)
     parser.add_argument("pre_extracted_md", type=Path, nargs="?", default=None)

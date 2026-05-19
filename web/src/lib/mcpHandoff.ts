@@ -13,7 +13,7 @@
 //      terminal:
 //        - one-time skill refresh: `uvx --python 3.12 --from ... coarse install-skills`
 //        - the review: `uvx --python 3.12 --from ... coarse-review --handoff
-//          <handoff-url> --host claude|codex|gemini [--model ...]
+//          <handoff-url> --host codex|claude|gemini [--model ...]
 //          [--effort ...]`
 //   5. The user's local `coarse-review` command:
 //        a. Fetches the bundle from /h/<token> as JSON
@@ -59,7 +59,7 @@ export const HOST_CLI_NAME: Record<ChatHost, "claude" | "codex" | "gemini"> = {
 // Default models per host (user can override in the modal).
 export const HOST_DEFAULT_MODELS: Record<ChatHost, string[]> = {
   "claude-code": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-  "codex": ["gpt-5.4", "gpt-5.3-codex", "gpt-5.4-mini", "gpt-5.4-pro"],
+  "codex": ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.4-mini", "gpt-5.4-pro"],
   "gemini-cli": [
     "gemini-3.1-pro-preview",
     "gemini-3-flash-preview",
@@ -67,7 +67,7 @@ export const HOST_DEFAULT_MODELS: Record<ChatHost, string[]> = {
   ],
 };
 
-export const EFFORT_LEVELS = ["low", "medium", "high", "max"] as const;
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const;
 export type EffortLevel = (typeof EFFORT_LEVELS)[number];
 
 // uvx install specifier used by both `coarse install-skills` and the
@@ -236,7 +236,7 @@ export function buildAgentPrompt(args: {
     `\`--timeout 2700\` in Codex, or the equivalent in Gemini CLI. ` +
     `The 45-minute recommendation leaves ~20 minutes of margin on top ` +
     `of the 10-25 minute review runtime for cold starts, slow models, ` +
-    `very long papers, and \`--effort max\` runs. 30 minutes used to ` +
+    `very long papers, and \`--effort xhigh\` runs. 30 minutes used to ` +
     `be the recommendation and it was tight — every agent's tool ` +
     `timeout is a wall clock, not an idle-stream cap, so a 25-minute ` +
     `review with a 30-minute cap leaves only 5 minutes of safety ` +

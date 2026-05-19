@@ -71,14 +71,14 @@ LOG=/tmp/coarse-review-$(basename <paper_path> .pdf).log
 # STEP 2a — launch (returns within 2 seconds with Review PID + Log file)
 uvx --python 3.12 --from 'coarse-ink==1.4.1' \
   coarse-review --detach --log-file "$LOG" \
-  <paper_path> --host claude [--model claude-opus-4-6] [--effort high]
+  <paper_path> --host claude [--model claude-opus-4-6] [--effort xhigh]
 
 # STEP 2b — wait (one blocking call, ~10-25 min, emits heartbeats)
 uvx --python 3.12 --from 'coarse-ink==1.4.1' \
   coarse-review --attach "$LOG"
 ```
 
-Run the attach call with a long Bash-tool timeout: in Claude Code, pass `timeout: 2700000` (45 minutes) on the `Bash` tool invocation so the tool doesn't kill the blocking command. The 45-minute recommendation leaves ~20 minutes of margin on top of the 10-25 minute review runtime for cold starts, slow models, long papers, and `--effort max` runs — 30 minutes is too tight because the tool timeout is a wall clock, not an idle-stream cap. Bump to 60 minutes for book-length papers or the largest models. Do NOT re-run the `--detach` command from STEP 2a if the attach call returns early — that would spawn a second worker. Safe to Ctrl+C the attach: the watcher detaches but the worker keeps running, and you can re-attach with the same command. Attach exit codes: `0` complete, `1` failure marker, `2` silent crash, `3` missing pidfile, `124` attach's own 30-min timeout, `130` user interrupt.
+Run the attach call with a long Bash-tool timeout: in Claude Code, pass `timeout: 2700000` (45 minutes) on the `Bash` tool invocation so the tool doesn't kill the blocking command. The 45-minute recommendation leaves ~20 minutes of margin on top of the 10-25 minute review runtime for cold starts, slow models, long papers, and `--effort xhigh` runs — 30 minutes is too tight because the tool timeout is a wall clock, not an idle-stream cap. Bump to 60 minutes for book-length papers or the largest models. Do NOT re-run the `--detach` command from STEP 2a if the attach call returns early — that would spawn a second worker. Safe to Ctrl+C the attach: the watcher detaches but the worker keeps running, and you can re-attach with the same command. Attach exit codes: `0` complete, `1` failure marker, `2` silent crash, `3` missing pidfile, `124` attach's own 30-min timeout, `130` user interrupt.
 
 **When attach exits with code 0, do NOT hunt across the filesystem for the review file.** `coarse-review` prints the authoritative paths in the final log lines:
 
@@ -92,7 +92,7 @@ rg '^  view:|^  local:' "$LOG"
 If `view:` says `unavailable`, treat that as a callback failure and report only the local path. Do **not** try to discover another web URL, and do **not** run broad `find`, `locate`, `lsof`, or whole-computer searches trying to rediscover the output.
 
 Available models: `claude-opus-4-6` (default), `claude-sonnet-4-6`, `claude-haiku-4-5`.
-Available effort levels: `low`, `medium`, `high` (default), `max`.
+Available effort levels: `low`, `medium`, `high`, `xhigh` (default).
 
 If the user came from the coarse web form, they'll paste a handoff URL instead of a local file path. The paper is a REMOTE resource at that URL — do NOT search for a local PDF and do NOT ask the user for a file path. Same two-step launch+attach pattern:
 

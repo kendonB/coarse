@@ -63,14 +63,14 @@ LOG=/tmp/coarse-review-$(basename <paper_path> .pdf).log
 # STEP 2a — launch (returns in ~2s)
 uvx --python 3.12 --from 'coarse-ink==1.4.1' \
   coarse-review --detach --log-file "$LOG" \
-  <paper_path> --host codex [--model gpt-5.4] [--effort high]
+  <paper_path> --host codex [--model gpt-5.5] [--effort xhigh]
 
 # STEP 2b — wait (one blocking call, ~10-25 min, emits heartbeats)
 uvx --python 3.12 --from 'coarse-ink==1.4.1' \
   coarse-review --attach "$LOG"
 ```
 
-Run the attach call with a long tool timeout — at least 45 minutes (`--timeout 2700`) — so Codex doesn't kill the blocking command prematurely. The 45-minute recommendation leaves ~20 minutes of margin on top of the 10-25 minute review runtime for cold starts, slow models, long papers, and `--effort max` runs; 30 minutes is too tight because the tool timeout is a wall clock, not an idle-stream cap. Bump to 60 minutes (`--timeout 3600`) for book-length papers or the largest models. Do NOT re-run the `--detach` command from STEP 2a if the attach call returns early (that would spawn a second worker). Safe to Ctrl+C the attach: the watcher detaches but the worker keeps running, and re-attaching with the same command is idempotent. Attach exit codes: `0` complete, `1` failure marker, `2` silent crash, `3` missing pidfile, `124` attach's own 30-min timeout, `130` user interrupt.
+Run the attach call with a long tool timeout — at least 45 minutes (`--timeout 2700`) — so Codex doesn't kill the blocking command prematurely. The 45-minute recommendation leaves ~20 minutes of margin on top of the 10-25 minute review runtime for cold starts, slow models, long papers, and `--effort xhigh` runs; 30 minutes is too tight because the tool timeout is a wall clock, not an idle-stream cap. Bump to 60 minutes (`--timeout 3600`) for book-length papers or the largest models. Do NOT re-run the `--detach` command from STEP 2a if the attach call returns early (that would spawn a second worker). Safe to Ctrl+C the attach: the watcher detaches but the worker keeps running, and re-attaching with the same command is idempotent. Attach exit codes: `0` complete, `1` failure marker, `2` silent crash, `3` missing pidfile, `124` attach's own 30-min timeout, `130` user interrupt.
 
 When attach exits cleanly, use the final log lines as the authoritative artifact locations:
 
@@ -81,14 +81,14 @@ rg '^  view:|^  local:' "$LOG"
 If `local:` is present, read that exact file. If `view:` is present, use that URL (it already includes the signed access token — use it as-is). Do not run broad filesystem searches trying to rediscover the review file.
 If `view:` says `unavailable`, report the callback failure and use only the `local:` path.
 
-Available models: `gpt-5.4` (default), `gpt-5.3-codex`, `gpt-5.4-mini`, `gpt-5.4-pro`.
-Available effort levels: `low`, `medium`, `high` (default), `max`.
+Available models: `gpt-5.5` (default), `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.4-mini`, `gpt-5.4-pro`.
+Available effort levels: `low`, `medium`, `high`, `xhigh` (default).
 
 These map to Codex's internal reasoning effort:
 - `low` → `low`
 - `medium` → `medium`
 - `high` → `high`
-- `max` → `high`
+- `xhigh` → `xhigh`
 
 **Handoff mode** (when the user came from the coarse web form): the paper is a REMOTE resource at the handoff URL. Do NOT search for a local PDF and do NOT ask the user for a file path — the `--handoff` URL IS the paper source. Same two-step launch+attach pattern:
 

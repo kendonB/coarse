@@ -47,7 +47,7 @@ LITERATURE_SEARCH_MODEL = "perplexity/sonar-pro-search"
 # and ``headless_clients`` all agree on the canonical default.
 HEADLESS_DEFAULT_MODELS: dict[str, str] = {
     "claude": "claude-opus-4-6",
-    "codex": "gpt-5.4",
+    "codex": "gpt-5.5",
     "gemini": "gemini-3.1-pro-preview",
 }
 
