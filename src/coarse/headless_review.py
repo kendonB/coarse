@@ -5,7 +5,7 @@ Usage:
         <paper_path> [<pre_extracted_md>] [<output_dir>]
 
 - ``--host``: which CLI to route every LLM call through.
-- ``<paper_path>``: PDF, MD, TeX, DOCX, HTML, or EPUB.
+- ``<paper_path>``: PDF, MD/QMD, TeX, DOCX, HTML, or EPUB.
 - ``<pre_extracted_md>``: optional pre-extracted markdown — skips OCR,
   saves ~$0.05-0.15 and ~30 seconds.
 - ``<output_dir>``: where to write ``<stem>_review.md``. Default:

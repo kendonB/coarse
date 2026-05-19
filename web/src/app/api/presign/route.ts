@@ -7,7 +7,7 @@ import { getSubmissionPauseResponse } from "@/lib/systemStatus";
 import { verifyTurnstileToken } from "@/lib/turnstile";
 
 const SUPPORTED_EXTENSIONS = new Set([
-  ".pdf", ".txt", ".md", ".tex", ".latex",
+  ".pdf", ".txt", ".md", ".qmd", ".tex", ".latex",
   ".html", ".htm", ".docx", ".epub",
 ]);
 

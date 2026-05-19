@@ -171,11 +171,11 @@ def test_format_hyperlink_tolerates_stdout_without_isatty() -> None:
 def test_infer_handoff_extension_prefers_supported_title_suffix() -> None:
     assert (
         _infer_handoff_extension(
-            paper_title="paper.md",
+            paper_title="paper.qmd",
             signed_url="https://example.test/storage/papers/123.pdf?token=abc",
             content_type="application/pdf",
         )
-        == ".md"
+        == ".qmd"
     )
 
 

@@ -477,7 +477,7 @@ def main(argv: list[str] | None = None) -> int:
         "paper_path",
         type=Path,
         nargs="?",
-        help="Local paper file (PDF, MD, TeX, DOCX, HTML, EPUB). Omit when using --handoff.",
+        help="Local paper file (PDF, MD/QMD, TeX, DOCX, HTML, EPUB). Omit when using --handoff.",
     )
     parser.add_argument(
         "--handoff",

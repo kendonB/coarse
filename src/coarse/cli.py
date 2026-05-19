@@ -110,7 +110,7 @@ def review(
     pdf: Path = typer.Argument(
         ...,
         exists=True,
-        help="Path to paper file (PDF, TXT, MD, TeX, DOCX, HTML, EPUB)",
+        help="Path to paper file (PDF, TXT, MD/QMD, TeX, DOCX, HTML, EPUB)",
     ),
     output: Optional[Path] = typer.Option(
         None, "--output", "-o", help="Output file path (default: <pdf_stem>_review.md)"

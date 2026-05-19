@@ -242,7 +242,7 @@ def review_paper(
 ) -> tuple[Review, str, PaperText]:
     """Full pipeline orchestrator.
 
-    Accepts any supported file format (PDF, TXT, MD, DOCX, TEX, HTML, EPUB).
+    Accepts any supported file format (PDF, TXT, MD/QMD, DOCX, TEX, HTML, EPUB).
     The ``pdf_path`` parameter name is kept for backwards compatibility.
 
     Args:

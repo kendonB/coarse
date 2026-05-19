@@ -133,7 +133,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "No storage path provided" }, { status: 400 });
   }
   // Storage path must be UUID.extension (set by presign) — reject anything else
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|txt|md|tex|latex|html|htm|docx|epub)$/i.test(storagePath)) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|txt|md|qmd|tex|latex|html|htm|docx|epub)$/i.test(storagePath)) {
     return NextResponse.json({ error: "Invalid storage path" }, { status: 400 });
   }
   // Bind the uploaded object name to the review id so a caller cannot point a

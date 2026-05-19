@@ -58,7 +58,7 @@ Or run `coarse setup` to store keys in `~/.coarse/config.toml`.
 
 ## Supported formats
 
-PDF, TXT, Markdown, LaTeX, DOCX, HTML, and EPUB. PDFs use Mistral OCR; other formats use
+PDF, TXT, Markdown/Quarto Markdown, LaTeX, DOCX, HTML, and EPUB. PDFs use Mistral OCR; other formats use
 Docling (if installed) with lightweight fallbacks. Install optional format support:
 
 ```bash
@@ -69,7 +69,7 @@ pip install coarse-ink[docling]   # Docling for PDF/DOCX/HTML/LaTeX
 ## How it works
 
 ```
-paper.pdf (or .txt, .md, .tex, .docx, .html, .epub)
+paper.pdf (or .txt, .md, .qmd, .tex, .docx, .html, .epub)
   -> Mistral OCR (Docling fallback)      Extract text as markdown
   -> Vision LLM spot-check               Optional QA (auto-triggers on garbled text)
   -> Structure analysis                   Parse sections, detect math content, classify domain
@@ -202,7 +202,7 @@ print(review.detailed_comments[0].feedback)  # access structured fields
 
 `review_paper` returns a `(Review, str, PaperText)` tuple: the structured `Review` model,
 rendered markdown, and the extracted paper text. The `pdf_path` parameter accepts any
-supported file format (PDF, TXT, MD, TeX, DOCX, HTML, EPUB).
+supported file format (PDF, TXT, MD/QMD, TeX, DOCX, HTML, EPUB).
 
 ## Configuration
 

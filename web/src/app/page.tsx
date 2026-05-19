@@ -597,7 +597,7 @@ export default function Home() {
     accept: {
       "application/pdf": [".pdf"],
       "text/plain": [".txt"],
-      "text/markdown": [".md"],
+      "text/markdown": [".md", ".qmd"],
       "text/x-tex": [".tex", ".latex"],
       "text/html": [".html", ".htm"],
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],

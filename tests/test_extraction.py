@@ -996,6 +996,22 @@ def test_extract_file_md(tmp_path: Path) -> None:
     assert result.garble_ratio == 0.0
 
 
+def test_extract_file_qmd(tmp_path: Path) -> None:
+    """Quarto Markdown files use the markdown/plaintext extraction path."""
+    qmd = tmp_path / "paper.qmd"
+    qmd.write_text(
+        "---\ntitle: Test Paper\n---\n\n# Introduction\n\nSome Quarto content.",
+        encoding="utf-8",
+    )
+
+    result = extract_file(qmd, use_cache=False)
+
+    assert "title: Test Paper" in result.full_markdown
+    assert "# Introduction" in result.full_markdown
+    assert "Some Quarto content." in result.full_markdown
+    assert result.garble_ratio == 0.0
+
+
 def test_extract_file_tex(tmp_path: Path) -> None:
     """LaTeX files have headings converted to markdown."""
     tex = tmp_path / "paper.tex"
@@ -1119,7 +1135,18 @@ def test_extract_latex_strips_preamble(tmp_path: Path) -> None:
 
 def test_supported_extensions_includes_all_formats() -> None:
     """SUPPORTED_EXTENSIONS includes all documented formats."""
-    for ext in [".pdf", ".txt", ".md", ".tex", ".latex", ".html", ".htm", ".docx", ".epub"]:
+    for ext in [
+        ".pdf",
+        ".txt",
+        ".md",
+        ".qmd",
+        ".tex",
+        ".latex",
+        ".html",
+        ".htm",
+        ".docx",
+        ".epub",
+    ]:
         assert ext in SUPPORTED_EXTENSIONS
 
 

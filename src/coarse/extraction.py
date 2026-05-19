@@ -1,6 +1,6 @@
 """Text extraction for coarse.
 
-Supports PDF, TXT, MD, DOCX, TEX/LATEX, HTML, and EPUB.
+Supports PDF, TXT, MD/QMD, DOCX, TEX/LATEX, HTML, and EPUB.
 
 Public API stays here; backend-specific helpers live in focused modules:
 - extraction_cache.py
@@ -58,6 +58,7 @@ SUPPORTED_EXTENSIONS = frozenset(
         ".pdf",
         ".txt",
         ".md",
+        ".qmd",
         ".tex",
         ".latex",
         ".html",
